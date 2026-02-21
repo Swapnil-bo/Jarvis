@@ -4,7 +4,7 @@
 > No cloud. No paid APIs. No internet required at runtime.
 > Built on a $999 laptop with 8GB RAM.
 
-**Part of my [100 Days of Vibe Coding](https://github.com/YOUR_USERNAME) challenge — starting Feb 24, 2026.**
+
 
 ---
 
