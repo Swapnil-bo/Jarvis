@@ -1,0 +1,65 @@
+# ============================================================
+# J.A.R.V.I.S. Configuration — Phase 1: Voice Core
+# ============================================================
+# Hardware: MacBook Air M1, 8GB Unified Memory
+# Rule: Total runtime RAM must stay under 5.5GB (leave 2.5GB for macOS)
+# ============================================================
+
+system:
+  project_name: "J.A.R.V.I.S."
+  version: "0.1.0"
+  log_level: "INFO"                    # DEBUG | INFO | WARNING | ERROR
+  memory_warning_threshold_mb: 5500    # Warn if total RAM usage > 5.5GB
+  memory_critical_threshold_mb: 6500   # Emergency: unload models at 6.5GB
+  log_dir: "logs"
+
+wake_word:
+  engine: "stt"
+  trigger_phrases:
+    - "jarvis"
+    - "jalvis"
+    - "hey jarvis"
+    - "hey jalvis"
+    - "hi jarvis"
+    - "hi jalvis"
+    - "okay jarvis"
+    - "okay jalvis"
+  listen_duration_sec: 2.5
+  stt_model: "mlx-community/whisper-base-mlx"
+
+stt:
+  engine: "mlx-whisper"
+  model_size: "medium"                 # Upgraded from small for better accuracy
+  model_id: "mlx-community/whisper-medium-mlx-4bit"  # 4-bit quantized — ~420MB vs 750MB full
+  language: "en"
+
+nlu:
+  engine: "ollama"
+  model: "phi3:mini"
+  fallback_model: "llama3.2:3b"
+  base_url: "http://localhost:11434"
+  context_window: 2048                 # Keep small to limit VRAM — 2048 tokens ≈ ~1500 words
+  temperature: 0.7
+  max_tokens: 256                      # Keep responses short and snappy
+  system_prompt: |
+    You are Jarvis, a helpful personal AI assistant running locally
+    on a MacBook Air. You are concise, witty, and action-oriented.
+    Respond in 1-3 sentences unless the user asks for detail.
+    Never mention that you are a language model or AI unless directly asked.
+    IMPORTANT: Always write your name as "Jarvis", never as "J.A.R.V.I.S." or any other acronym form.
+
+tts:
+  engine: "macos_say"                  # "piper" or "macos_say"
+  macos_voice: "Daniel"                # Try: "Daniel", "Samantha", "Alex"
+  macos_rate: 190                      # Words per minute (default ~175)
+
+audio:
+  sample_rate: 16000                   # 16kHz — standard for speech models
+  channels: 1                          # Mono — all speech models expect mono
+  dtype: "int16"                       # 16-bit integer audio
+  chunk_duration_ms: 80               # Size of each audio chunk in milliseconds
+  silence_threshold: 30               # RMS below this = silence (was 500, way too high)
+  max_recording_seconds: 8            # Safety cap on single utterance length
+  min_recording_seconds: 2.0           # Always record at least 2s (prevents premature cutoff)
+  silence_duration_to_stop: 2.0        # 2s of silence to stop (was 1.5 — gives natural pauses room)
+  pre_roll_chunks: 6                   # Keep ~0.5s of audio before speech starts (prevents clipped words)
