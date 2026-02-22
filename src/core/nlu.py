@@ -57,21 +57,28 @@ class NLUEngine:
         except requests.ConnectionError:
             return False
 
-    def _call_ollama(self, prompt: str, model: str) -> str:
+    def _call_ollama(self, prompt: str, model: str, memory_context: str = "") -> str:
         """
         Make a request to Ollama's generate API.
 
         Args:
             prompt: The user's transcribed speech.
             model: Which Ollama model to use.
+            memory_context: Optional memory context to inject into system prompt.
 
         Returns:
             The model's response text.
         """
+        # Build the full system prompt with memory context
+        if memory_context:
+            full_system = f"{self.system_prompt}\n\n{memory_context}"
+        else:
+            full_system = self.system_prompt
+
         payload = {
             "model": model,
             "prompt": prompt,
-            "system": self.system_prompt,
+            "system": full_system,
             "stream": False,               # Get complete response at once
             "options": {
                 "num_ctx": self.context_window,
@@ -88,14 +95,24 @@ class NLUEngine:
         response.raise_for_status()
 
         data = response.json()
-        return data.get("response", "").strip()
+        raw_response = data.get("response", "").strip()
 
-    def think(self, user_input: str) -> str:
+        # --- Phi-3 hallucination cleanup ---
+        # Phi-3 Mini sometimes generates fake instructions, markdown headers,
+        # or "training data" after its actual response. Cut it off.
+        for poison in ["---", "###", "REFERENCE:", "Instruction:", "```"]:
+            if poison in raw_response:
+                raw_response = raw_response[:raw_response.index(poison)].strip()
+
+        return raw_response
+
+    def think(self, user_input: str, memory_context: str = "") -> str:
         """
-        Process user input and return J.A.R.V.I.S.'s response.
+        Process user input and return Jarvis's response.
 
         Args:
             user_input: The transcribed text from the user.
+            memory_context: Memory context block from MemoryManager.
 
         Returns:
             The AI assistant's response string.
@@ -109,6 +126,9 @@ class NLUEngine:
             return "I didn't catch that. Could you repeat?"
 
         logger.info(f"🧠 Thinking about: \"{user_input}\"")
+
+        if memory_context:
+            logger.debug(f"  Memory context injected ({len(memory_context)} chars)")
 
         # Check if Ollama is running
         if not self._check_ollama_running():
@@ -124,7 +144,7 @@ class NLUEngine:
         # Try primary model
         try:
             logger.info(f"Using primary model: {self.model}")
-            response = self._call_ollama(user_input, self.model)
+            response = self._call_ollama(user_input, self.model, memory_context)
             if response:
                 logger.info(f"💬 Response: \"{response[:100]}...\"")
                 log_memory(logger)
@@ -135,7 +155,7 @@ class NLUEngine:
         # Try fallback model
         try:
             logger.info(f"Falling back to: {self.fallback_model}")
-            response = self._call_ollama(user_input, self.fallback_model)
+            response = self._call_ollama(user_input, self.fallback_model, memory_context)
             if response:
                 logger.info(f"💬 Fallback response: \"{response[:100]}...\"")
                 log_memory(logger)

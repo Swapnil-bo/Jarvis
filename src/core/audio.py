@@ -144,8 +144,12 @@ class AudioCapture:
         """
         return self.audio_queue.get()
 
-    def _flush_queue(self):
-        """Discard stale audio (e.g., from during TTS playback)."""
+    def flush_queue(self):
+        """
+        Discard all audio currently in the queue.
+        Call this after TTS finishes speaking to prevent the mic
+        from picking up Jarvis's own voice and self-triggering.
+        """
         discarded = 0
         while not self.audio_queue.empty():
             try:
@@ -155,6 +159,10 @@ class AudioCapture:
                 break
         if discarded:
             logger.debug(f"  Flushed {discarded} stale audio chunks")
+
+    def _flush_queue(self):
+        """Internal alias — used by record_speech()."""
+        self.flush_queue()
 
     def _rms_energy(self, audio: np.ndarray) -> float:
         """Calculate RMS energy of an audio chunk."""

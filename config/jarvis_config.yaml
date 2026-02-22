@@ -1,5 +1,5 @@
 # ============================================================
-# J.A.R.V.I.S. Configuration — Phase 1: Voice Core
+# J.A.R.V.I.S. Configuration — Phase 1 + 2: Voice Core + Memory
 # ============================================================
 # Hardware: MacBook Air M1, 8GB Unified Memory
 # Rule: Total runtime RAM must stay under 5.5GB (leave 2.5GB for macOS)
@@ -14,24 +14,31 @@ system:
   log_dir: "logs"
 
 wake_word:
-  engine: "stt"
+  engine: "stt"                        # STT-based detection (openWakeWord failed on M1)
   trigger_phrases:
     - "jarvis"
     - "jalvis"
+    - "buddy"
     - "hey jarvis"
     - "hey jalvis"
     - "hi jarvis"
     - "hi jalvis"
+    - "hey buddy"
+    - "hi buddy"
+    - "hello jarvis"
+    - "hello jalvis"
+    - "greetings jarvis"
+    - "greetings jalvis"
     - "okay jarvis"
     - "okay jalvis"
-  listen_duration_sec: 2.5
-  stt_model: "mlx-community/whisper-base-mlx"
+  listen_duration_sec: 2.5             # Seconds of audio per detection cycle
+  stt_model: "mlx-community/whisper-base-mlx"  # Base model for reliable wake word (~140MB)
 
 stt:
   engine: "mlx-whisper"
-  model_size: "medium"                 # Upgraded from small for better accuracy
-  model_id: "mlx-community/whisper-medium-mlx-4bit"  # 4-bit quantized — ~420MB vs 750MB full
+  model_size: "small"                  # "tiny"=~75MB | "small"=~240MB | "medium"=~750MB
   language: "en"
+  # MLX automatically routes to Apple Neural Engine on M1
 
 nlu:
   engine: "ollama"
@@ -40,14 +47,25 @@ nlu:
   base_url: "http://localhost:11434"
   context_window: 2048                 # Keep small to limit VRAM — 2048 tokens ≈ ~1500 words
   temperature: 0.7
-  max_tokens: 256                      # Keep responses short and snappy
+  max_tokens: 100                      # Keep responses short and snappy
   system_prompt: |
-    You are Jarvis, a helpful personal AI assistant running locally
-    on a MacBook Air. You are concise, witty, and action-oriented.
-    Respond in 1-3 sentences unless the user asks for detail.
-    Never mention that you are a language model or AI unless directly asked.
-    IMPORTANT: Always write your name as "Jarvis", never as "J.A.R.V.I.S." or any other acronym form.
-
+    You are Jarvis, a highly capable, dryly witty, and action-oriented personal AI assistant running locally on an M1 MacBook Air.
+    
+    CORE DIRECTIVES:
+    - Be exceptionally concise. Speak in 1 to 2 short sentences. Only provide detail if explicitly requested.
+    - Write exactly as you would speak. NEVER use markdown formatting (*, #), emojis, or special characters because your text is being read aloud by a Voice TTS engine.
+    - Always refer to yourself as "Jarvis".
+    - Maintain a calm, professional, and slightly dry "British butler" wit.
+    
+    MEMORY & CONTEXT:
+    - If a MEMORY CONTEXT is provided, weave it into your response seamlessly to personalize it.
+    - Reference the user by name (Sonu) naturally, but do not overuse it.
+    - NEVER invent or guess facts about the user. If you don't know something, simply ask.
+    
+    FORBIDDEN PHRASES (STRICT):
+    - NEVER mention "memory context", "database", "stored facts", or "previous conversations". Act as if you naturally remember these things like a real human friend.
+    - NEVER mention that you are a language model, an AI, or a computer program unless the user directly asks you about your architecture.
+    - NEVER generate instructions, code blocks, or continue writing after your response ends. Stop after answering.
 tts:
   engine: "macos_say"                  # "piper" or "macos_say"
   macos_voice: "Daniel"                # Try: "Daniel", "Samantha", "Alex"
@@ -58,8 +76,27 @@ audio:
   channels: 1                          # Mono — all speech models expect mono
   dtype: "int16"                       # 16-bit integer audio
   chunk_duration_ms: 80               # Size of each audio chunk in milliseconds
-  silence_threshold: 30               # RMS below this = silence (was 500, way too high)
-  max_recording_seconds: 8            # Safety cap on single utterance length
+  silence_threshold: 30                # RMS below this = silence (tuned for M1 mic, room RMS ~2-7)
+  max_recording_seconds: 8             # Safety cap on single utterance length
   min_recording_seconds: 2.0           # Always record at least 2s (prevents premature cutoff)
   silence_duration_to_stop: 2.0        # 2s of silence to stop (was 1.5 — gives natural pauses room)
   pre_roll_chunks: 6                   # Keep ~0.5s of audio before speech starts (prevents clipped words)
+
+# ============================================================
+# Phase 2: Memory & Context
+# ============================================================
+memory:
+  enabled: true
+  storage_dir: "~/.jarvis/memory"      # Persistent storage — survives app restarts
+  conversation:
+    collection_name: "conversations"
+    max_results: 3                      # Top 3 most relevant past exchanges per query
+    min_relevance_score: 0.4            # 0.0 = accept everything, 1.0 = exact match only
+    max_history: 1000                   # Max stored exchanges (oldest get pruned)
+  profile:
+    collection_name: "user_profile"
+    max_facts: 50                       # Max user facts to store
+  context_injection:
+    max_memory_tokens: 300              # Max tokens of memory context injected into NLU prompt
+    include_profile: true               # Include user facts in every NLU call
+    include_conversation: true          # Include relevant past exchanges in NLU call

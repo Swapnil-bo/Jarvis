@@ -16,6 +16,7 @@ from src.core.wake_word import WakeWordDetector
 from src.core.stt import SpeechToText
 from src.core.nlu import NLUEngine
 from src.core.tts import TextToSpeech
+from src.memory import MemoryManager
 from src.utils.logger import get_logger, log_memory
 
 logger = get_logger("main")
@@ -45,6 +46,7 @@ def print_banner():
     ║                                                      ║
     ║        MacBook Air M1 Edition — 100% Local           ║
     ║        Phase 1: Voice Core                           ║
+    ║        Phase 2: Memory & Context                     ║
     ║                                                      ║
     ╚══════════════════════════════════════════════════════╝
     """
@@ -84,6 +86,19 @@ def main():
     # 5. TTS
     tts = TextToSpeech()
 
+    # 6. Memory system (ChromaDB + embeddings, ~130MB)
+    try:
+        memory = MemoryManager()
+        stats = memory.get_stats()
+        logger.info(
+            f"🧠 Memory: {stats.get('total_exchanges', 0)} past exchanges, "
+            f"{stats.get('total_facts', 0)} user facts"
+        )
+    except Exception as e:
+        logger.warning(f"⚠️  Memory system failed to load: {e}")
+        logger.warning("   Continuing without memory (conversations won't be saved)")
+        memory = None
+
     log_memory(logger)
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     logger.info("✅ All systems online")
@@ -92,6 +107,10 @@ def main():
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     tts.speak("Jarvis is online and ready, sir.")
+
+    # Flush the audio queue — mic just heard Jarvis speak through the laptop
+    # speakers. Without this, wake word detector triggers on his own voice.
+    audio_capture.flush_queue()
 
     # --------------------------------------------------
     # MAIN LOOP
@@ -105,12 +124,14 @@ def main():
                 logger.info("🎯 Wake word triggered")
 
                 tts.speak("Yes?")
+                audio_capture.flush_queue()
 
                 # Step 2: Record speech
                 speech_audio = audio_capture.record_speech()
 
                 if speech_audio is None:
                     tts.speak("I didn't hear anything. Try again.")
+                    audio_capture.flush_queue()
                     gc.collect()
                     continue
 
@@ -123,16 +144,35 @@ def main():
 
                 if not user_text:
                     tts.speak("I couldn't understand that. Could you repeat?")
+                    audio_capture.flush_queue()
                     continue
 
                 logger.info(f"👤 You: \"{user_text}\"")
 
-                # Step 4: Think
-                response = nlu.think(user_text)
+                # Step 4: Build memory context
+                memory_context = ""
+                if memory:
+                    try:
+                        memory_context = memory.build_context(user_text)
+                    except Exception as e:
+                        logger.warning(f"  Memory search failed (non-critical): {e}")
+
+                # Step 5: Think (with memory context injected)
+                response = nlu.think(user_text, memory_context)
                 logger.info(f"🤖 Jarvis: \"{response}\"")
 
-                # Step 5: Speak
+                # Step 6: Speak
                 tts.speak(response)
+
+                # Flush audio queue — mic heard Jarvis speak through speakers
+                audio_capture.flush_queue()
+
+                # Step 7: Save to memory
+                if memory:
+                    try:
+                        memory.after_exchange(user_text, response)
+                    except Exception as e:
+                        logger.warning(f"  Memory save failed (non-critical): {e}")
 
                 # Cycle complete — force garbage collection to reclaim
                 # whisper's temporary buffers (~100-200MB of tensors).
