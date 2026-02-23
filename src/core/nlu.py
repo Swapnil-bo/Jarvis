@@ -71,7 +71,21 @@ class NLUEngine:
         """
         # Build the full system prompt with memory context
         if memory_context:
-            full_system = f"{self.system_prompt}\n\n{memory_context}"
+            # Rewrite memory lines to explicitly attribute to user
+            rewritten_lines = []
+            for line in memory_context.strip().split("\n"):
+                line = line.strip()
+                if line and not line.startswith("=") and not line.startswith("-"):
+                    if not line.lower().startswith("the user"):
+                        line = f"The user (Sonu): {line}"
+                rewritten_lines.append(line)
+            safe_context = "\n".join(rewritten_lines)
+
+            full_system = (
+                f"{self.system_prompt}\n\n"
+                f"=== FACTS ABOUT YOUR USER (NOT about you Jarvis) ===\n"
+                f"{safe_context}"
+            )
         else:
             full_system = self.system_prompt
 
@@ -103,6 +117,16 @@ class NLUEngine:
         for poison in ["---", "###", "REFERENCE:", "Instruction:", "```"]:
             if poison in raw_response:
                 raw_response = raw_response[:raw_response.index(poison)].strip()
+        
+        # --- Identity confusion cleanup ---
+        # Phi-3 sometimes adopts user facts as its own
+        identity_poisons = ["as an engineer myself", "my aspirations", "as an aspiring", 
+                           "my passion for ai", "as a student myself", "my engineering"]
+        response_lower = raw_response.lower()
+        for phrase in identity_poisons:
+            if phrase in response_lower:
+                raw_response = "You're Sonu, an aspiring AI engineer. How can I help you today?"
+                break
 
         return raw_response
 
