@@ -17,6 +17,12 @@ from src.core.stt import SpeechToText
 from src.core.nlu import NLUEngine
 from src.core.tts import TextToSpeech
 from src.memory import MemoryManager
+from src.tools.router import ToolRouter
+from src.tools.system_info import SystemInfoTool
+from src.tools.mac_control import MacControlTool
+from src.tools.reminder import ReminderTool
+from src.tools.web_search import WebSearchTool
+from src.tools.whatsapp import WhatsAppTool
 from src.utils.logger import get_logger, log_memory
 
 logger = get_logger("main")
@@ -47,6 +53,7 @@ def print_banner():
     ║        MacBook Air M1 Edition — 100% Local           ║
     ║        Phase 1: Voice Core                           ║
     ║        Phase 2: Memory & Context                     ║
+    ║        Phase 3: Tools & Actions                      ║
     ║                                                      ║
     ╚══════════════════════════════════════════════════════╝
     """
@@ -99,6 +106,14 @@ def main():
         logger.warning("   Continuing without memory (conversations won't be saved)")
         memory = None
 
+    # 7. Tool Router (Phase 3 — action tools)
+    tool_router = ToolRouter()
+    tool_router.register_tool("system_info", SystemInfoTool())
+    tool_router.register_tool("mac_control", MacControlTool())
+    tool_router.register_tool("reminder", ReminderTool())
+    tool_router.register_tool("web_search", WebSearchTool())
+    tool_router.register_tool("whatsapp", WhatsAppTool())
+
     log_memory(logger)
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     logger.info("✅ All systems online")
@@ -149,25 +164,32 @@ def main():
 
                 logger.info(f"👤 You: \"{user_text}\"")
 
-                # Step 4: Build memory context
-                memory_context = ""
-                if memory:
-                    try:
-                        memory_context = memory.build_context(user_text)
-                    except Exception as e:
-                        logger.warning(f"  Memory search failed (non-critical): {e}")
+                # Step 4: Try tool routing first
+                tool_result = tool_router.route(user_text)
 
-                # Step 5: Think (with memory context injected)
-                response = nlu.think(user_text, memory_context)
-                logger.info(f"🤖 Jarvis: \"{response}\"")
+                if tool_result:
+                    # Tool handled it — speak the result directly
+                    response = tool_result
+                    logger.info(f"🤖 Jarvis: \"{response}\"")
+                else:
+                    # No tool needed — normal conversation with memory
+                    memory_context = ""
+                    if memory:
+                        try:
+                            memory_context = memory.build_context(user_text)
+                        except Exception as e:
+                            logger.warning(f"  Memory search failed (non-critical): {e}")
 
-                # Step 6: Speak
+                    response = nlu.think(user_text, memory_context)
+                    logger.info(f"🤖 Jarvis: \"{response}\"")
+
+                # Step 5: Speak
                 tts.speak(response)
 
                 # Flush audio queue — mic heard Jarvis speak through speakers
                 audio_capture.flush_queue()
 
-                # Step 7: Save to memory
+                # Step 6: Save to memory (both tool results and conversations)
                 if memory:
                     try:
                         memory.after_exchange(user_text, response)
