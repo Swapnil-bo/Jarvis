@@ -154,6 +154,7 @@ class WakeWordDetector:
                             f"(matched: \"{phrase}\") "
                             f"[avg_rms={avg_rms:.0f}, peak={max_rms:.0f}]"
                         )
+                        self.last_match = phrase
                         return True
 
                 logger.debug(

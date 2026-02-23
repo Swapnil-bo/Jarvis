@@ -1,15 +1,22 @@
 """
-J.A.R.V.I.S. — Main Entry Point (Final — Demo Ready)
-=======================================================
+J.A.R.V.I.S. — Main Entry Point
+==================================
 Phase 1: Voice Core Pipeline
+Phase 2: Memory & Context
+Phase 3: Tools & Actions
+Phase 4: Visual Dashboard
 
 Run:  python -m src.main
 """
 
 import gc
+import os
 import signal
 import sys
+import threading
 import time
+
+import psutil
 
 from src.core.audio import AudioCapture
 from src.core.wake_word import WakeWordDetector
@@ -23,6 +30,7 @@ from src.tools.mac_control import MacControlTool
 from src.tools.reminder import ReminderTool
 from src.tools.web_search import WebSearchTool
 from src.tools.whatsapp import WhatsAppTool
+from src.dashboard import events as dash_events
 from src.utils.logger import get_logger, log_memory
 
 logger = get_logger("main")
@@ -34,15 +42,16 @@ audio_capture = None
 def graceful_shutdown(sig, frame):
     """Handle Ctrl+C cleanly."""
     global audio_capture
-    print()  # Clean newline after ^C
+    print()
     logger.info("👋 J.A.R.V.I.S. shutting down. Goodbye, sir.")
+    dash_events.emit({"type": "status", "state": "offline"})
     if audio_capture:
         audio_capture.close()
     sys.exit(0)
 
 
 def print_banner():
-    """Print a clean startup banner for demo videos."""
+    """Print startup banner."""
     banner = """
     ╔══════════════════════════════════════════════════════╗
     ║                                                      ║
@@ -54,10 +63,53 @@ def print_banner():
     ║        Phase 1: Voice Core                           ║
     ║        Phase 2: Memory & Context                     ║
     ║        Phase 3: Tools & Actions                      ║
+    ║        Phase 4: Visual Dashboard                     ║
     ║                                                      ║
     ╚══════════════════════════════════════════════════════╝
     """
     print(banner)
+
+
+def start_telemetry(memory=None):
+    """
+    Background thread: emits RAM, battery, and memory stats every 3 seconds.
+    """
+    process = psutil.Process(os.getpid())
+
+    def _loop():
+        while True:
+            try:
+                proc_mem = process.memory_info().rss // (1024 * 1024)
+                sys_mem = psutil.virtual_memory()
+
+                event = {
+                    "type": "telemetry",
+                    "ram_process": proc_mem,
+                    "ram_system": sys_mem.used // (1024 * 1024),
+                    "ram_total": sys_mem.total // (1024 * 1024),
+                }
+
+                batt = psutil.sensors_battery()
+                if batt:
+                    event["battery"] = int(batt.percent)
+                    event["battery_charging"] = batt.power_plugged
+
+                if memory:
+                    try:
+                        stats = memory.get_stats()
+                        event["exchanges"] = stats.get("total_exchanges", 0)
+                        event["facts"] = stats.get("total_facts", 0)
+                    except Exception:
+                        pass
+
+                dash_events.emit(event)
+            except Exception:
+                pass
+
+            time.sleep(3)
+
+    t = threading.Thread(target=_loop, daemon=True, name="telemetry")
+    t.start()
 
 
 def main():
@@ -72,7 +124,7 @@ def main():
     logger.info("Initializing subsystems...")
     log_memory(logger)
 
-    # 1. Audio capture — persistent mic stream with 85Hz high-pass filter
+    # 1. Audio capture
     try:
         audio_capture = AudioCapture()
     except Exception as e:
@@ -80,7 +132,7 @@ def main():
         logger.error("   Check: System Settings → Privacy → Microphone → enable for Terminal/Cursor")
         sys.exit(1)
 
-    # 2. Wake word — reads from shared audio stream
+    # 2. Wake word
     wake_word = WakeWordDetector(audio_capture)
     log_memory(logger)
 
@@ -93,7 +145,7 @@ def main():
     # 5. TTS
     tts = TextToSpeech()
 
-    # 6. Memory system (ChromaDB + embeddings, ~130MB)
+    # 6. Memory system
     try:
         memory = MemoryManager()
         stats = memory.get_stats()
@@ -106,7 +158,7 @@ def main():
         logger.warning("   Continuing without memory (conversations won't be saved)")
         memory = None
 
-    # 7. Tool Router (Phase 3 — action tools)
+    # 7. Tool Router
     tool_router = ToolRouter()
     tool_router.register_tool("system_info", SystemInfoTool())
     tool_router.register_tool("mac_control", MacControlTool())
@@ -114,18 +166,29 @@ def main():
     tool_router.register_tool("web_search", WebSearchTool())
     tool_router.register_tool("whatsapp", WhatsAppTool())
 
+    # 8. Dashboard Server (Phase 4)
+    try:
+        from src.dashboard import server as dash_server
+        dash_server.start(port=8765)
+    except Exception as e:
+        logger.warning(f"⚠️  Dashboard failed to start: {e}")
+        logger.warning("   Continuing without dashboard. Run: pip install fastapi uvicorn")
+
+    # 9. Telemetry thread
+    start_telemetry(memory)
+
     log_memory(logger)
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     logger.info("✅ All systems online")
     logger.info("🎙️  Say 'Hey Jarvis' to activate")
+    logger.info("📊 Dashboard: http://127.0.0.1:8765")
     logger.info("⌨️  Press Ctrl+C to quit")
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     tts.speak("Jarvis is online and ready, sir.")
-
-    # Flush the audio queue — mic just heard Jarvis speak through the laptop
-    # speakers. Without this, wake word detector triggers on his own voice.
     audio_capture.flush_queue()
+
+    dash_events.emit({"type": "status", "state": "online"})
 
     # --------------------------------------------------
     # MAIN LOOP
@@ -137,42 +200,63 @@ def main():
             # Step 1: Listen for wake word
             if wake_word.listen_and_detect():
                 logger.info("🎯 Wake word triggered")
+                dash_events.emit({"type": "status", "state": "wake_detected"})
+                dash_events.emit({"type": "wake_word", "phrase": getattr(wake_word, 'last_match', 'hey jarvis') or 'hey jarvis'})
 
                 tts.speak("Yes?")
                 audio_capture.flush_queue()
 
                 # Step 2: Record speech
+                dash_events.emit({"type": "status", "state": "listening"})
                 speech_audio = audio_capture.record_speech()
 
                 if speech_audio is None:
                     tts.speak("I didn't hear anything. Try again.")
                     audio_capture.flush_queue()
+                    dash_events.emit({"type": "status", "state": "idle"})
                     gc.collect()
                     continue
 
                 # Step 3: Transcribe
+                dash_events.emit({"type": "status", "state": "thinking"})
                 user_text = stt.transcribe(speech_audio)
 
-                # Free the raw audio immediately — it's large and no longer needed
                 del speech_audio
                 gc.collect()
 
                 if not user_text:
                     tts.speak("I couldn't understand that. Could you repeat?")
                     audio_capture.flush_queue()
+                    dash_events.emit({"type": "status", "state": "idle"})
                     continue
 
                 logger.info(f"👤 You: \"{user_text}\"")
+                dash_events.emit({"type": "transcription", "text": user_text})
 
                 # Step 4: Try tool routing first
                 tool_result = tool_router.route(user_text)
 
                 if tool_result:
-                    # Tool handled it — speak the result directly
                     response = tool_result
+
+                    # Emit routing event
+                    route_info = getattr(tool_router, "last_route", {})
+                    dash_events.emit({
+                        "type": "routing",
+                        "tool": route_info.get("tool", "unknown"),
+                        "action": route_info.get("action", ""),
+                        "params": route_info.get("params", {}),
+                    })
                     logger.info(f"🤖 Jarvis: \"{response}\"")
                 else:
-                    # No tool needed — normal conversation with memory
+                    # No tool — normal conversation
+                    dash_events.emit({
+                        "type": "routing",
+                        "tool": "none",
+                        "action": "chat",
+                        "params": {},
+                    })
+
                     memory_context = ""
                     if memory:
                         try:
@@ -184,23 +268,22 @@ def main():
                     logger.info(f"🤖 Jarvis: \"{response}\"")
 
                 # Step 5: Speak
+                dash_events.emit({"type": "status", "state": "speaking"})
+                dash_events.emit({"type": "response", "text": response})
                 tts.speak(response)
-
-                # Flush audio queue — mic heard Jarvis speak through speakers
                 audio_capture.flush_queue()
 
-                # Step 6: Save to memory (both tool results and conversations)
+                # Step 6: Save to memory
                 if memory:
                     try:
                         memory.after_exchange(user_text, response)
                     except Exception as e:
                         logger.warning(f"  Memory save failed (non-critical): {e}")
 
-                # Cycle complete — force garbage collection to reclaim
-                # whisper's temporary buffers (~100-200MB of tensors).
-                # On 8GB this gets us back to baseline faster.
+                # Cycle complete
                 cycle_count += 1
                 gc.collect()
+                dash_events.emit({"type": "status", "state": "idle"})
 
                 logger.info(f"── Cycle {cycle_count} complete ──")
                 log_memory(logger)
@@ -210,7 +293,6 @@ def main():
             graceful_shutdown(None, None)
 
         except OSError as e:
-            # Mic disconnect, audio device error, etc.
             logger.error(f"🎤 Audio device error: {e}")
             logger.info("   Attempting to recover in 3 seconds...")
             time.sleep(3)
