@@ -1,5 +1,5 @@
 """
-J.A.R.V.I.S. Tool Router — Phase 3
+J.A.R.V.I.S. Tool Router — Phase 5
 =====================================
 The brain behind tool selection. Takes user input, classifies intent,
 and routes to the appropriate tool.
@@ -31,6 +31,7 @@ Available tools:
 - reminder: set timer, set reminder, countdown
 - web_search: search the internet, look up information, weather, temperature, news, prices, scores
 - whatsapp: send a WhatsApp message to someone
+- vision: read screen text (ocr), describe what's on screen (describe_screen), describe webcam view (describe_webcam)
 
 Respond with ONLY a JSON object, nothing else. No markdown, no explanation.
 
@@ -38,6 +39,9 @@ IMPORTANT RULES:
 - "Open [any app name]" is ALWAYS mac_control with action open_app, never another tool.
 - Only use the whatsapp tool when the user wants to SEND a message.
 - Any question about weather, temperature, news, prices, scores, or current real-world information is ALWAYS web_search.
+- "Read my screen" or "what text is on screen" is ALWAYS vision with action ocr.
+- "What's on my screen" or "describe my screen" is ALWAYS vision with action describe_screen.
+- "What do you see" (with webcam context) or "can you see me" is ALWAYS vision with action describe_webcam.
 
 If it's a tool command:
 {"tool": "tool_name", "action": "specific_action", "params": {"key": "value"}}
@@ -75,6 +79,14 @@ User: "Who won the cricket match?" -> {"tool": "web_search", "action": "search",
 User: "What is the current temperature?" -> {"tool": "web_search", "action": "search", "params": {"query": "current temperature"}}
 User: "Send a WhatsApp message to Mom saying I'll be late" -> {"tool": "whatsapp", "action": "send", "params": {"contact": "Mom", "message": "I'll be late"}}
 User: "Message Aditya on WhatsApp saying hello" -> {"tool": "whatsapp", "action": "send", "params": {"contact": "Aditya", "message": "hello"}}
+User: "Read my screen" -> {"tool": "vision", "action": "ocr"}
+User: "What text is on my screen?" -> {"tool": "vision", "action": "ocr"}
+User: "What's on my screen?" -> {"tool": "vision", "action": "describe_screen"}
+User: "Describe my screen" -> {"tool": "vision", "action": "describe_screen"}
+User: "What app is open?" -> {"tool": "vision", "action": "describe_screen"}
+User: "Can you see me?" -> {"tool": "vision", "action": "describe_webcam"}
+User: "What do you see?" -> {"tool": "vision", "action": "describe_webcam"}
+User: "How do I look?" -> {"tool": "vision", "action": "describe_webcam"}
 User: "How are you doing?" -> {"tool": "none"}
 User: "Tell me about yourself" -> {"tool": "none"}
 User: "What can you do?" -> {"tool": "none"}"""
@@ -110,9 +122,9 @@ class ToolRouter:
         self.tools[name] = handler
         logger.info(f"  🔧 Tool registered: {name}")
 
-    # ──────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════
     # Stage 1: Keyword Pre-Filter (instant, zero LLM calls)
-    # ──────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════
 
     def _keyword_route(self, user_text: str) -> dict:
         """
@@ -141,6 +153,31 @@ class ToolRouter:
             "battery percentage", "battery life"
         ]):
             return {"tool": "system_info", "action": "battery", "params": {}}
+
+        # ── Vision: OCR (read text from screen) ──
+        if any(kw in text_lower for kw in [
+            "read my screen", "read the screen", "read the text",
+            "what text", "text on screen", "ocr", "extract text",
+            "what does my screen say"
+        ]):
+            return {"tool": "vision", "action": "ocr", "params": {}}
+
+        # ── Vision: Describe screen ──
+        if any(kw in text_lower for kw in [
+            "what's on my screen", "whats on my screen", "describe my screen",
+            "look at my screen", "what do you see on my screen",
+            "what app is open", "what am i looking at",
+            "what am i working on", "describe screen"
+        ]):
+            return {"tool": "vision", "action": "describe_screen", "params": {}}
+
+        # ── Vision: Webcam describe ──
+        if any(kw in text_lower for kw in [
+            "what do you see", "can you see me", "look at me",
+            "webcam", "camera", "what am i wearing",
+            "how do i look", "who do you see", "describe me"
+        ]):
+            return {"tool": "vision", "action": "describe_webcam", "params": {}}
 
         # ── Weather / temperature → web_search ──
         if any(kw in text_lower for kw in [
@@ -237,24 +274,29 @@ class ToolRouter:
 
         # ── Timer / Reminder ──
         if any(kw in text_lower for kw in [
-            "set a timer", "set timer", "timer for", "countdown",
-            "remind me", "set a reminder", "alarm"
+            "set a timer", "set timer", "remind me", "set a reminder",
+            "countdown", "alarm", "timer for"
         ]):
-            # Extract minutes from text
+            # Extract time and optional message
             numbers = re.findall(r'\d+', text_lower)
             minutes = int(numbers[0]) if numbers else 5
-            # Check if it says "hours"
-            if "hour" in text_lower and numbers:
-                minutes = int(numbers[0]) * 60
-            # Check for reminder message
-            message = ""
-            if "remind" in text_lower and " to " in text_lower:
-                message = text_lower.split(" to ", 1)[1].strip()
-                for suffix in [" please", " for me"]:
-                    message = message.replace(suffix, "").strip()
-            if message:
+
+            # Check if it's a reminder with a message
+            message = None
+            for trigger in ["to ", "that ", "about "]:
+                if trigger in text_lower:
+                    parts = text_lower.split(trigger, 1)
+                    if len(parts) > 1:
+                        candidate = parts[1].strip()
+                        # Don't treat "to 5 minutes" as a message
+                        if candidate and not candidate[0].isdigit():
+                            message = candidate
+                            break
+
+            if "remind" in text_lower and message:
                 return {"tool": "reminder", "action": "reminder", "params": {"minutes": minutes, "message": message}}
-            return {"tool": "reminder", "action": "timer", "params": {"minutes": minutes}}
+            else:
+                return {"tool": "reminder", "action": "timer", "params": {"minutes": minutes}}
 
         # No keyword match — fall through to Phi-3
         return None
@@ -286,9 +328,9 @@ class ToolRouter:
         # Title case the app name
         return app.title() if app else ""
 
-    # ──────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════
     # Stage 2: Phi-3 Classification (complex/ambiguous cases)
-    # ──────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════
 
     def classify(self, user_text: str) -> dict:
         """
@@ -372,9 +414,9 @@ class ToolRouter:
             logger.warning(f"Router classification failed: {e}")
             return {"tool": "none"}
 
-    # ──────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════
     # Execute + Route
-    # ──────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════
 
     def execute(self, classification: dict) -> str:
         """

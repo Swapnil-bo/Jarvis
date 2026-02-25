@@ -101,3 +101,24 @@ tools:
   enabled: true
   system_info:
     weather_city: ""
+
+# ============================================================
+# Phase 4: Visual Dashboard
+# ============================================================
+dashboard:
+  enabled: true
+  port: 8765
+  host: "localhost"
+  debug: false
+  template_dir: "templates"
+  static_dir: "static"
+  log_level: "INFO"
+  log_dir: "logs"
+
+# ============================================================
+# Phase 5: Vision
+# ============================================================
+vision:
+  vision_model: "llava-phi3"
+  ollama_base_url: "http://localhost:11434"
+  vision_timeout: 90
