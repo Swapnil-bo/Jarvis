@@ -197,13 +197,35 @@ class ToolRouter:
 
         # ── Volume control ──
         if any(kw in text_lower for kw in ["volume", "mute", "unmute"]):
-            # Phi-3 handles level extraction
-            return None
+            if "mute" in text_lower and "unmute" not in text_lower:
+                return {"tool": "mac_control", "action": "volume_mute", "params": {}}
+            if "unmute" in text_lower:
+                return {"tool": "mac_control", "action": "volume_set", "params": {"level": 50}}
+            if "max" in text_lower or "full" in text_lower or "100" in text_lower:
+                return {"tool": "mac_control", "action": "volume_set", "params": {"level": 100}}
+            if "up" in text_lower or "increase" in text_lower or "raise" in text_lower or "higher" in text_lower:
+                return {"tool": "mac_control", "action": "volume_up", "params": {}}
+            if "down" in text_lower or "decrease" in text_lower or "lower" in text_lower or "reduce" in text_lower:
+                return {"tool": "mac_control", "action": "volume_down", "params": {}}
+            # Extract number
+            numbers = re.findall(r'\d+', text_lower)
+            if numbers:
+                level = min(int(numbers[0]), 100)
+                return {"tool": "mac_control", "action": "volume_set", "params": {"level": level}}
+            # Default: just return volume_up
+            return {"tool": "mac_control", "action": "volume_up", "params": {}}
 
         # ── Brightness control ──
         if "brightness" in text_lower:
-            # Phi-3 handles up/down
-            return None
+            if "max" in text_lower or "full" in text_lower or "100" in text_lower:
+                return {"tool": "mac_control", "action": "brightness_up", "params": {}}
+            if "up" in text_lower or "increase" in text_lower or "raise" in text_lower or "higher" in text_lower:
+                return {"tool": "mac_control", "action": "brightness_up", "params": {}}
+            if "down" in text_lower or "decrease" in text_lower or "lower" in text_lower or "reduce" in text_lower or "dim" in text_lower:
+                return {"tool": "mac_control", "action": "brightness_down", "params": {}}
+            if "min" in text_lower or "low" in text_lower:
+                return {"tool": "mac_control", "action": "brightness_down", "params": {}}
+            return {"tool": "mac_control", "action": "brightness_up", "params": {}}
 
         # ── Screenshot ──
         if "screenshot" in text_lower or "screen shot" in text_lower:
@@ -215,11 +237,24 @@ class ToolRouter:
 
         # ── Timer / Reminder ──
         if any(kw in text_lower for kw in [
-            "set a timer", "set timer", "remind me", "set a reminder",
-            "countdown", "alarm", "timer for"
+            "set a timer", "set timer", "timer for", "countdown",
+            "remind me", "set a reminder", "alarm"
         ]):
-            # Phi-3 handles time + message extraction
-            return None
+            # Extract minutes from text
+            numbers = re.findall(r'\d+', text_lower)
+            minutes = int(numbers[0]) if numbers else 5
+            # Check if it says "hours"
+            if "hour" in text_lower and numbers:
+                minutes = int(numbers[0]) * 60
+            # Check for reminder message
+            message = ""
+            if "remind" in text_lower and " to " in text_lower:
+                message = text_lower.split(" to ", 1)[1].strip()
+                for suffix in [" please", " for me"]:
+                    message = message.replace(suffix, "").strip()
+            if message:
+                return {"tool": "reminder", "action": "reminder", "params": {"minutes": minutes, "message": message}}
+            return {"tool": "reminder", "action": "timer", "params": {"minutes": minutes}}
 
         # No keyword match — fall through to Phi-3
         return None
