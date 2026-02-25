@@ -33,7 +33,6 @@
 └───────────────────────────────────────────────────┘
 ```
 
-**Live glassmorphic dashboard** at `http://127.0.0.1:8765` — real-time status ring, conversation feed, tool router log, system telemetry, all over WebSocket.
 
 ---
 
