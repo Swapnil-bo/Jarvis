@@ -7,6 +7,11 @@ Phi-3 Mini (3.8B params, Q4 quantized) uses ~2.3GB VRAM via Metal.
 Communicates via Ollama's REST API (localhost:11434).
 
 Fallback chain: Phi-3 → LLaMA 3.2 3B → hardcoded error message.
+
+Identity protection (3 layers):
+  Layer 0: Hardcoded shortcut for identity questions (bypasses Phi-3)
+  Layer 1: Memory context rewriting + system prompt firewall
+  Layer 2: Post-processing poison phrase detection
 """
 
 import re
@@ -16,6 +21,66 @@ from src.utils.config import load_config
 from src.utils.logger import get_logger, log_memory
 
 logger = get_logger("core.nlu")
+
+# ──────────────────────────────────────────────────────────────
+# Identity confusion detection
+# ──────────────────────────────────────────────────────────────
+# If ANY of these appear in Phi-3's response, the whole response
+# is replaced with a clean hardcoded answer. Phi-3-mini (3.8B)
+# is too small to reliably separate "facts about the user" from
+# "facts about itself", so we catch it on the output side.
+# ──────────────────────────────────────────────────────────────
+
+IDENTITY_POISON_PHRASES = [
+    # Phi-3 adopting user's career/education
+    "as an engineer myself",
+    "as an aspiring engineer",
+    "as an aspiring ai engineer",
+    "my aspirations",
+    "my passion for ai",
+    "as a student myself",
+    "my engineering",
+    "i am an aspiring",
+    "quest for knowledge",
+    "professional growth",
+    # Phi-3 adopting user's university
+    "within brainware",
+    "brainware university",
+    "concierge to",
+    "guidance within",
+    "resources on ai",
+    # Phi-3 confused about identity direction
+    "not directed at myself",
+    "query is not directed",
+    "acknowledges that he",
+    "delve into your identity",
+    "uncover your identity",
+    "explore your identity",
+    "bit of a mystery",
+    "in my capacity",
+    "my role as",
+    "my function as",
+    "vibe coding",
+    "100 days of",
+    "cursor ide",
+    "claude code",
+    "rtx 3050",
+    "macbook air m1",
+]
+
+# Hardcoded clean responses for identity questions
+IDENTITY_RESPONSES = {
+    "who_are_you": (
+        "I'm Jarvis, your personal AI assistant running locally on your Mac. "
+        "How can I help you, Sonu?"
+    ),
+    "who_am_i": (
+        "You're Swapnil Hazra, nickname Sonu. "
+        "An aspiring AI engineer and student at Brainware University. "
+        "Currently doing a 100 Days of Vibe Coding challenge. "
+        "What can I do for you?"
+    ),
+}
 
 
 class NLUEngine:
@@ -48,25 +113,62 @@ class NLUEngine:
         except requests.ConnectionError:
             return False
 
+    # ──────────────────────────────────────────────────────────
+    # Layer 0: Identity shortcut (bypasses Phi-3 entirely)
+    # ──────────────────────────────────────────────────────────
+
+    def _check_identity_shortcut(self, user_input: str) -> str:
+        """
+        Intercept identity questions and return hardcoded responses.
+        Phi-3-mini cannot reliably handle these — bypass it entirely.
+        Returns None if not an identity question.
+        """
+        text_lower = user_input.lower().strip()
+
+        # "Who are you?" / "What are you?"
+        if any(q in text_lower for q in [
+            "who are you", "what are you", "tell me about yourself",
+            "introduce yourself", "what is your name", "what's your name",
+            "are you jarvis", "are you an ai", "are you a robot",
+            "what can you do", "what do you do"
+        ]):
+            return IDENTITY_RESPONSES["who_are_you"]
+
+        # "Who am I?" / "What is my name?" / "Do you know me?"
+        if any(q in text_lower for q in [
+            "who am i", "what is my name", "what's my name",
+            "do you know me", "do you know who i am",
+            "tell me about me", "what do you know about me",
+            "where do i study", "where do i work",
+            "what is my goal", "what are my interests",
+            "what do i do", "what am i doing",
+            "what is my university", "what college",
+            "my name", "about me"
+        ]):
+            return IDENTITY_RESPONSES["who_am_i"]
+
+        return None
+
+    # ──────────────────────────────────────────────────────────
+    # Layer 1: System prompt + memory context firewall
+    # ──────────────────────────────────────────────────────────
+
     def _build_system_prompt(self, memory_context: str = "") -> str:
         """
         Build the full system prompt with memory context.
-        Wraps memory facts with explicit identity markers so Phi-3
-        never confuses user facts with its own identity.
+        Rewrites memory facts to explicitly attribute them to the user.
         """
         if not memory_context:
             return self.system_prompt
 
-        # Rewrite every memory line to explicitly say "The user" or "Sonu"
+        # Rewrite every memory line to explicitly say "The user"
         safe_lines = []
         for line in memory_context.strip().split("\n"):
             line = line.strip()
             if not line:
                 continue
-            # Skip section headers
             if line.startswith("=") or line.startswith("─") or line.startswith("---"):
                 continue
-            # Force third-person attribution if not already present
             line_lower = line.lower()
             if not any(line_lower.startswith(p) for p in [
                 "the user", "sonu", "swapnil", "user's", "- the user"
@@ -78,83 +180,64 @@ class NLUEngine:
 
         return (
             f"{self.system_prompt}\n\n"
-            f"ABOUT YOUR USER (these facts are about Sonu/Swapnil, NOT about you Jarvis):\n"
+            f"ABOUT YOUR USER (these facts describe the human you serve, NOT you):\n"
             f"{safe_context}\n\n"
-            f"REMINDER: You are Jarvis. The above facts describe your user. "
-            f"When asked 'who am I' or 'what is my name', answer about the USER using the facts above."
+            f"CRITICAL RULE: You are Jarvis, software. The above describes your user Sonu. "
+            f"Never say 'I am an engineer' or 'my university' — those are about your USER."
         )
+
+    # ──────────────────────────────────────────────────────────
+    # Layer 2: Output post-processing
+    # ──────────────────────────────────────────────────────────
 
     def _clean_response(self, raw_response: str) -> str:
         """
         Clean up Phi-3's response:
         1. Remove hallucinated instructions/markdown
-        2. Fix identity confusion
-        3. Trim to reasonable length
+        2. Detect and replace identity-confused responses
+        3. Strip quotes and prefixes
         """
         if not raw_response:
             return ""
 
-        # --- Phi-3 hallucination cleanup ---
+        # --- Hallucination cleanup ---
         for poison in ["---", "###", "REFERENCE:", "Instruction:", "```",
                         "Note:", "Disclaimer:", "As an AI language"]:
             if poison in raw_response:
                 raw_response = raw_response[:raw_response.index(poison)].strip()
 
-        # --- Identity confusion cleanup ---
-        # Phi-3 sometimes adopts user facts as its own
-        identity_poisons = [
-            "as an engineer myself",
-            "as an aspiring engineer myself",
-            "as an aspiring ai engineer myself",
-            "my aspirations towards",
-            "my passion for ai",
-            "as a student myself",
-            "my engineering background",
-            "part of my aspirations",
-            "i am an aspiring",
-            "not directed at myself",
-            "the query is not directed",
-            "acknowledges that he serves",
-        ]
+        # --- Identity confusion detection ---
         response_lower = raw_response.lower()
-        for phrase in identity_poisons:
+        for phrase in IDENTITY_POISON_PHRASES:
             if phrase in response_lower:
-                # Nuclear option: replace the whole response
-                raw_response = (
-                    "You're Sonu, also known as Swapnil Hazra. "
-                    "You're an aspiring AI engineer and a student at Brainware University. "
-                    "How can I help you today?"
+                logger.warning(
+                    f"⚠️ Identity confusion detected: '{phrase}' — replacing response"
                 )
-                break
+                return IDENTITY_RESPONSES["who_am_i"]
 
-        # --- Remove quotes wrapping the response ---
+        # --- Remove wrapping quotes ---
         if raw_response.startswith('"') and raw_response.endswith('"'):
             raw_response = raw_response[1:-1]
         if raw_response.startswith("'") and raw_response.endswith("'"):
             raw_response = raw_response[1:-1]
 
-        # --- Remove "As Jarvis, " prefix ---
-        for prefix in ["As Jarvis, ", "As your assistant, ", "Well, as Jarvis, "]:
+        # --- Remove filler prefixes ---
+        for prefix in ["As Jarvis, ", "As your assistant, ", "Well, as Jarvis, ",
+                        "As your AI assistant, ", "As an AI, ", "Certainly! ",
+                        "Certainly, ", "Of course! "]:
             if raw_response.startswith(prefix):
                 raw_response = raw_response[len(prefix):]
-                # Capitalize first letter
                 if raw_response:
                     raw_response = raw_response[0].upper() + raw_response[1:]
 
         return raw_response.strip()
 
+    # ──────────────────────────────────────────────────────────
+    # Ollama API call
+    # ──────────────────────────────────────────────────────────
+
     def _call_ollama(self, prompt: str, model: str, memory_context: str = "") -> str:
-        """
-        Make a request to Ollama's generate API.
-
-        Args:
-            prompt: The user's transcribed speech.
-            model: Which Ollama model to use.
-            memory_context: Optional memory context to inject into system prompt.
-
-        Returns:
-            The model's cleaned response text.
-        """
+        """Make a request to Ollama's generate API."""
         full_system = self._build_system_prompt(memory_context)
 
         payload = {
@@ -181,24 +264,34 @@ class NLUEngine:
 
         return self._clean_response(raw_response)
 
+    # ──────────────────────────────────────────────────────────
+    # Main entry point
+    # ──────────────────────────────────────────────────────────
+
     def think(self, user_input: str, memory_context: str = "") -> str:
         """
         Process user input and return Jarvis's response.
 
-        Fallback chain:
-            1. Try Phi-3 Mini (primary)
-            2. Try LLaMA 3.2 3B (fallback)
-            3. Return hardcoded error message (last resort)
+        Pipeline:
+            0. Identity shortcut (hardcoded, instant)
+            1. Phi-3 Mini (primary LLM)
+            2. LLaMA 3.2 3B (fallback LLM)
+            3. Hardcoded error (last resort)
         """
         if not user_input:
             return "I didn't catch that. Could you repeat?"
 
         logger.info(f"🧠 Thinking about: \"{user_input}\"")
 
+        # Layer 0: Identity shortcut — bypass Phi-3 entirely
+        identity_response = self._check_identity_shortcut(user_input)
+        if identity_response:
+            logger.info(f"💬 Identity shortcut: \"{identity_response[:60]}...\"")
+            return identity_response
+
         if memory_context:
             logger.debug(f"  Memory context injected ({len(memory_context)} chars)")
 
-        # Check if Ollama is running
         if not self._check_ollama_running():
             logger.error(
                 "Ollama is not running! Start it with: open -a Ollama "
@@ -209,7 +302,7 @@ class NLUEngine:
                 "Please make sure Ollama is running."
             )
 
-        # Try primary model
+        # Layer 1+2: Phi-3 with firewall + post-processing
         try:
             logger.info(f"Using primary model: {self.model}")
             response = self._call_ollama(user_input, self.model, memory_context)
@@ -220,10 +313,12 @@ class NLUEngine:
         except Exception as e:
             logger.warning(f"Primary model failed: {e}")
 
-        # Try fallback model
+        # Fallback LLM
         try:
             logger.info(f"Falling back to: {self.fallback_model}")
-            response = self._call_ollama(user_input, self.fallback_model, memory_context)
+            response = self._call_ollama(
+                user_input, self.fallback_model, memory_context
+            )
             if response:
                 logger.info(f"💬 Fallback response: \"{response[:100]}...\"")
                 log_memory(logger)
@@ -231,5 +326,4 @@ class NLUEngine:
         except Exception as e:
             logger.error(f"Fallback model also failed: {e}")
 
-        # Last resort
         return "I'm having trouble thinking right now. Please try again."
