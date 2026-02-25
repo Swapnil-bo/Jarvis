@@ -1,28 +1,19 @@
 """
 J.A.R.V.I.S. Tool Router — Phase 3
 =====================================
-The brain behind tool selection. Takes user input, asks Phi-3 to classify
-whether it's a tool command or just conversation, and routes accordingly.
+The brain behind tool selection. Takes user input, classifies intent,
+and routes to the appropriate tool.
 
-How it works:
-  1. User says something (already transcribed by STT).
-  2. Router sends it to Phi-3 with a classification prompt.
-  3. Phi-3 returns a JSON-like response: tool name + action + parameters.
-  4. Router calls the appropriate tool module.
-  5. Tool returns a result string.
-  6. Result is spoken by TTS.
+Two-stage routing:
+  Stage 1: Keyword pre-filter — catches obvious commands instantly (0ms).
+  Stage 2: Phi-3 classification — handles complex/ambiguous commands (~2-5s).
 
-If Phi-3 says it's just conversation (no tool needed), router returns None
-and main.py falls back to the normal NLU chat path.
-
-Why Phi-3 for routing (not keywords)?
-  - "What's the time?" and "Tell me the current time" both work
-  - "Open Chrome" and "Launch Google Chrome" both work
-  - No brittle regex or keyword lists to maintain
-  - Phi-3 already loaded in Ollama — zero extra RAM
+If neither stage identifies a tool, returns None and main.py falls back
+to the normal NLU chat path.
 """
 
 import json
+import re
 import requests
 
 from src.utils.config import load_config
@@ -30,9 +21,7 @@ from src.utils.logger import get_logger
 
 logger = get_logger("tools.router")
 
-# Classification prompt — tells Phi-3 how to identify tool calls.
-# This is sent as the system prompt for the routing call ONLY.
-# Kept minimal to be fast (~50 tokens output max).
+# Classification prompt for Phi-3 (Stage 2 only — complex cases)
 ROUTER_SYSTEM_PROMPT = """You are a command classifier for a voice assistant called Jarvis.
 Given the user's spoken input, determine if they want to use a TOOL or just CHAT.
 
@@ -40,7 +29,7 @@ Available tools:
 - system_info: time, date, day, battery level
 - mac_control: open/close apps, volume up/down/mute, brightness up/down, screenshot, sleep, lock screen
 - reminder: set timer, set reminder, countdown
-- web_search: search the internet, look up information, find something online, weather, temperature, current news, latest updates, prices, scores
+- web_search: search the internet, look up information, weather, temperature, news, prices, scores
 - whatsapp: send a WhatsApp message to someone
 
 Respond with ONLY a JSON object, nothing else. No markdown, no explanation.
@@ -67,8 +56,10 @@ User: "How much battery is left?" -> {"tool": "system_info", "action": "battery"
 User: "Open Safari" -> {"tool": "mac_control", "action": "open_app", "params": {"app": "Safari"}}
 User: "Open WhatsApp" -> {"tool": "mac_control", "action": "open_app", "params": {"app": "WhatsApp"}}
 User: "Launch Spotify" -> {"tool": "mac_control", "action": "open_app", "params": {"app": "Spotify"}}
+User: "Can you open Brave browser?" -> {"tool": "mac_control", "action": "open_app", "params": {"app": "Brave Browser"}}
 User: "Set volume to 50 percent" -> {"tool": "mac_control", "action": "volume_set", "params": {"level": 50}}
 User: "Set volume to 10 percent" -> {"tool": "mac_control", "action": "volume_set", "params": {"level": 10}}
+User: "Mute the volume" -> {"tool": "mac_control", "action": "volume_mute"}
 User: "Set brightness to maximum" -> {"tool": "mac_control", "action": "brightness_up"}
 User: "Take a screenshot" -> {"tool": "mac_control", "action": "screenshot"}
 User: "Lock the screen" -> {"tool": "mac_control", "action": "lock"}
@@ -88,9 +79,11 @@ User: "How are you doing?" -> {"tool": "none"}
 User: "Tell me about yourself" -> {"tool": "none"}
 User: "What can you do?" -> {"tool": "none"}"""
 
+
 class ToolRouter:
     """
     Routes user input to the appropriate tool or back to chat.
+    Two-stage: keyword pre-filter (instant) → Phi-3 classification (fallback).
     """
 
     def __init__(self):
@@ -100,11 +93,11 @@ class ToolRouter:
         self.base_url: str = nlu_cfg["base_url"]
         self.model: str = nlu_cfg["model"]
 
-        # Registry of tool handlers — each tool registers itself here
+        # Registry of tool handlers
         self.tools: dict = {}
         self.last_route: dict = {}
 
-        logger.info("Tool router initialized")
+        logger.info("Tool router initialized (keyword pre-filter + Phi-3)")
 
     def register_tool(self, name: str, handler):
         """
@@ -116,6 +109,151 @@ class ToolRouter:
         """
         self.tools[name] = handler
         logger.info(f"  🔧 Tool registered: {name}")
+
+    # ──────────────────────────────────────────────────────────
+    # Stage 1: Keyword Pre-Filter (instant, zero LLM calls)
+    # ──────────────────────────────────────────────────────────
+
+    def _keyword_route(self, user_text: str) -> dict:
+        """
+        Fast keyword-based routing for obvious commands.
+        Returns a classification dict, or None if no keyword match.
+        """
+        text_lower = user_text.lower()
+
+        # ── Time queries ──
+        if any(kw in text_lower for kw in [
+            "what time", "current time", "tell me the time", "what's the time",
+            "what is the time", "time right now", "time please"
+        ]):
+            return {"tool": "system_info", "action": "time", "params": {}}
+
+        # ── Date queries ──
+        if any(kw in text_lower for kw in [
+            "what date", "current date", "what day", "today's date",
+            "what is today", "which day", "date today"
+        ]):
+            return {"tool": "system_info", "action": "date", "params": {}}
+
+        # ── Battery queries ──
+        if any(kw in text_lower for kw in [
+            "battery", "charge level", "power left", "how much charge",
+            "battery percentage", "battery life"
+        ]):
+            return {"tool": "system_info", "action": "battery", "params": {}}
+
+        # ── Weather / temperature → web_search ──
+        if any(kw in text_lower for kw in [
+            "weather", "temperature", "how hot", "how cold", "forecast",
+            "rain today", "humidity", "sunny", "cloudy", "wind speed"
+        ]):
+            return {"tool": "web_search", "action": "search", "params": {"query": user_text}}
+
+        # ── Current events / prices / scores → web_search ──
+        if any(kw in text_lower for kw in [
+            "price of", "stock price", "bitcoin", "crypto", "score",
+            "who won", "match result", "latest news", "current news",
+            "headlines", "trending", "election", "ipl"
+        ]):
+            return {"tool": "web_search", "action": "search", "params": {"query": user_text}}
+
+        # ── Explicit search intent → web_search ──
+        if any(kw in text_lower for kw in [
+            "search for", "look up", "google", "find out", "search about",
+            "tell me about the latest", "what is happening"
+        ]):
+            return {"tool": "web_search", "action": "search", "params": {"query": user_text}}
+
+        # ── WhatsApp messaging ──
+        if any(kw in text_lower for kw in [
+            "send a whatsapp", "whatsapp message", "message to",
+            "text to", "send message to", "send a message"
+        ]):
+            # Phi-3 handles contact + message extraction
+            return None
+
+        # ── App launch / control ──
+        if any(kw in text_lower for kw in [
+            "open ", "launch ", "start "
+        ]) and not any(kw in text_lower for kw in [
+            "whatsapp message", "send a", "message to"
+        ]):
+            app = self._extract_app_name(text_lower)
+            if app:
+                return {"tool": "mac_control", "action": "open_app", "params": {"app": app}}
+
+        # ── Close app ──
+        if "close " in text_lower or "quit " in text_lower or "exit " in text_lower:
+            app = text_lower
+            for prefix in ["close the ", "close ", "quit ", "exit "]:
+                if prefix in app:
+                    app = app.split(prefix, 1)[1].strip()
+                    break
+            for suffix in [" app", " application", " please", " for me"]:
+                app = app.replace(suffix, "").strip()
+            app = app.title()
+            if app:
+                return {"tool": "mac_control", "action": "close_app", "params": {"app": app}}
+
+        # ── Volume control ──
+        if any(kw in text_lower for kw in ["volume", "mute", "unmute"]):
+            # Phi-3 handles level extraction
+            return None
+
+        # ── Brightness control ──
+        if "brightness" in text_lower:
+            # Phi-3 handles up/down
+            return None
+
+        # ── Screenshot ──
+        if "screenshot" in text_lower or "screen shot" in text_lower:
+            return {"tool": "mac_control", "action": "screenshot", "params": {}}
+
+        # ── Lock screen ──
+        if any(kw in text_lower for kw in ["lock screen", "lock the screen", "lock my mac"]):
+            return {"tool": "mac_control", "action": "lock", "params": {}}
+
+        # ── Timer / Reminder ──
+        if any(kw in text_lower for kw in [
+            "set a timer", "set timer", "remind me", "set a reminder",
+            "countdown", "alarm", "timer for"
+        ]):
+            # Phi-3 handles time + message extraction
+            return None
+
+        # No keyword match — fall through to Phi-3
+        return None
+
+    def _extract_app_name(self, text_lower: str) -> str:
+        """
+        Extract app name from 'open/launch/start' commands.
+        E.g., "can you open brave browser?" → "Brave Browser"
+        """
+        app = text_lower
+        for prefix in [
+            "can you please open ", "can you open ", "could you open ",
+            "please open the ", "please open ", "please launch ",
+            "open the ", "open ", "launch the ", "launch ",
+            "start the ", "start "
+        ]:
+            if prefix in app:
+                app = app.split(prefix, 1)[1].strip()
+                break
+
+        # Remove trailing filler words
+        for suffix in [" app", " application", " browser", " please",
+                       " for me", " right now", " now"]:
+            app = app.replace(suffix, "").strip()
+
+        # Remove question marks / punctuation
+        app = re.sub(r'[?!.,]', '', app).strip()
+
+        # Title case the app name
+        return app.title() if app else ""
+
+    # ──────────────────────────────────────────────────────────
+    # Stage 2: Phi-3 Classification (complex/ambiguous cases)
+    # ──────────────────────────────────────────────────────────
 
     def classify(self, user_text: str) -> dict:
         """
@@ -137,9 +275,9 @@ class ToolRouter:
                     "system": ROUTER_SYSTEM_PROMPT,
                     "stream": False,
                     "options": {
-                        "num_ctx": 1024,        # Small context — classification is simple
-                        "temperature": 0.1,     # Low temp — we want deterministic routing
-                        "num_predict": 100,     # Short output — just JSON
+                        "num_ctx": 1024,
+                        "temperature": 0.1,
+                        "num_predict": 100,
                     },
                 },
                 timeout=15,
@@ -148,9 +286,6 @@ class ToolRouter:
 
             raw = response.json().get("response", "").strip()
 
-            # Try to extract JSON from the response
-            # Phi-3 sometimes appends garbage text after valid JSON
-            
             # Remove markdown code blocks if present
             if "```" in raw:
                 raw = raw.split("```")[1]
@@ -158,18 +293,16 @@ class ToolRouter:
                     raw = raw[4:]
                 raw = raw.strip()
 
-            # Find the first { and try to parse from there
+            # Find the first { and try to parse JSON
             start = raw.find("{")
             if start < 0:
                 return {"tool": "none"}
 
-            # Try parsing increasingly longer substrings from start
-            # This handles cases where Phi-3 appends garbage after valid JSON
+            # Find matching closing brace
             json_str = raw[start:]
             result = None
-            
-            # Find matching closing brace by counting braces
             depth = 0
+
             for i, char in enumerate(json_str):
                 if char == "{":
                     depth += 1
@@ -188,7 +321,7 @@ class ToolRouter:
             tool_name = result.get("tool", "none")
             if tool_name != "none":
                 logger.info(
-                    f"🔧 Router: tool={tool_name}, "
+                    f"🔧 Router (Phi-3): tool={tool_name}, "
                     f"action={result.get('action', 'unknown')}, "
                     f"params={result.get('params', {})}"
                 )
@@ -204,12 +337,13 @@ class ToolRouter:
             logger.warning(f"Router classification failed: {e}")
             return {"tool": "none"}
 
+    # ──────────────────────────────────────────────────────────
+    # Execute + Route
+    # ──────────────────────────────────────────────────────────
+
     def execute(self, classification: dict) -> str:
         """
         Execute the classified tool action.
-
-        Args:
-            classification: Dict from classify() with tool, action, params.
 
         Returns:
             Result string to be spoken by TTS.
@@ -238,68 +372,25 @@ class ToolRouter:
 
     def route(self, user_text: str) -> str:
         """
-        Full routing pipeline: classify → execute.
-
-        Args:
-            user_text: Transcribed user speech.
+        Full routing pipeline:
+          1. Try keyword pre-filter (instant)
+          2. Fall back to Phi-3 classification (slower)
+          3. Execute the matched tool
 
         Returns:
             Tool result string, or None if it's just conversation.
         """
+        # Stage 1: Keyword pre-filter
+        keyword_match = self._keyword_route(user_text)
+        if keyword_match is not None:
+            logger.info(
+                f"⚡ Router (keyword): tool={keyword_match['tool']}, "
+                f"action={keyword_match.get('action', '')}"
+            )
+            self.last_route = keyword_match
+            return self.execute(keyword_match)
 
-        # ── Keyword pre-filter (bypasses Phi-3 for obvious cases) ──
-        text_lower = user_text.lower()
-
-        # Time queries
-        if any(kw in text_lower for kw in ["what time", "current time", "tell me the time", "what's the time", "what is the time", "time right now"]):
-            self.last_route = {"tool": "system_info", "action": "time", "params": {}}
-            return self.execute(self.last_route)
-
-        # Date queries
-        if any(kw in text_lower for kw in ["what date", "current date", "what day", "today's date", "what is today", "which day"]):
-            self.last_route = {"tool": "system_info", "action": "date", "params": {}}
-            return self.execute(self.last_route)
-
-        # Battery queries
-        if any(kw in text_lower for kw in ["battery", "charge level", "power left", "how much charge"]):
-            self.last_route = {"tool": "system_info", "action": "battery", "params": {}}
-            return self.execute(self.last_route)
-
-        # Weather/temperature → web_search
-        if any(kw in text_lower for kw in ["weather", "temperature", "how hot", "how cold", "forecast", "rain today", "humidity"]):
-            self.last_route = {"tool": "web_search", "action": "search", "params": {"query": user_text}}
-            return self.execute(self.last_route)
-
-        # Current events / prices / scores → web_search
-        if any(kw in text_lower for kw in ["price of", "stock price", "bitcoin", "crypto", "score", "who won", "match result", "latest news", "current news", "headlines", "trending"]):
-            self.last_route = {"tool": "web_search", "action": "search", "params": {"query": user_text}}
-            return self.execute(self.last_route)
-
-        # Explicit search intent → web_search
-        if any(kw in text_lower for kw in ["search for", "look up", "google", "find out", "search about"]):
-            self.last_route = {"tool": "web_search", "action": "search", "params": {"query": user_text}}
-            return self.execute(self.last_route)
-
-        # Volume control
-        if any(kw in text_lower for kw in ["set volume", "volume to", "turn volume", "mute", "unmute"]):
-            # Let Phi-3 handle param extraction for volume level
-            pass
-
-        # App launch
-        if any(kw in text_lower for kw in ["open ", "launch ", "start ", "close "]) and not any(kw in text_lower for kw in ["whatsapp message", "send a", "message to"]):
-            # Let Phi-3 handle app name extraction
-            pass
-
-        # WhatsApp — must check before falling through
-        if any(kw in text_lower for kw in ["send a whatsapp", "whatsapp message", "message to", "text to", "send message"]):
-            # Let Phi-3 handle contact + message extraction
-            pass
-
-        # Timer/reminder
-        if any(kw in text_lower for kw in ["set a timer", "set timer", "remind me", "set a reminder", "countdown", "alarm"]):
-            # Let Phi-3 handle time + message extraction
-            pass
-
+        # Stage 2: Phi-3 classification
         classification = self.classify(user_text)
         self.last_route = classification
         return self.execute(classification)
