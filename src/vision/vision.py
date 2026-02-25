@@ -92,6 +92,10 @@ class VisionTool:
         self.ollama_base = config.get("ollama_base_url", "http://localhost:11434")
         self.timeout = config.get("vision_timeout", 90)
 
+        # Stores raw unformatted result for NLU reasoning
+        # (OCR: full text before truncation, describe: full LLaVA response)
+        self.last_raw_result = ""
+
         logger.info(
             f"🔭 Vision tool initialized — model: {self.vision_model}, "
             f"native_ocr: {NATIVE_OCR_AVAILABLE}, webcam: {IMAGESNAP_AVAILABLE}"
@@ -369,6 +373,9 @@ class VisionTool:
         elapsed = time.time() - start
         logger.info(f"🔭 Vision response in {elapsed:.1f}s ({len(result)} chars)")
 
+        # Store raw response for NLU reasoning
+        self.last_raw_result = result
+
         # Clean up resized temp file
         if resized_path != image_path and os.path.exists(resized_path):
             os.remove(resized_path)
@@ -397,7 +404,11 @@ class VisionTool:
             text = self._native_ocr(path)
 
             if not text or text.strip() == "":
+                self.last_raw_result = ""
                 return "I couldn't detect any text on your screen."
+
+            # Store FULL raw text for NLU reasoning (before TTS truncation)
+            self.last_raw_result = text.strip()
 
             # For TTS: don't read 500 lines of code — summarize
             lines = text.strip().split("\n")

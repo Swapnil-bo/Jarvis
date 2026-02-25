@@ -5,6 +5,7 @@ Phase 1: Voice Core Pipeline
 Phase 2: Memory & Context
 Phase 3: Tools & Actions
 Phase 4: Visual Dashboard
+Phase 5: Multimodal Vision
 
 Run:  python -m src.main
 """
@@ -30,6 +31,7 @@ from src.tools.mac_control import MacControlTool
 from src.tools.reminder import ReminderTool
 from src.tools.web_search import WebSearchTool
 from src.tools.whatsapp import WhatsAppTool
+from src.vision.vision import VisionTool
 from src.dashboard import events as dash_events
 from src.utils.logger import get_logger, log_memory
 
@@ -51,19 +53,20 @@ def graceful_shutdown(sig, frame):
 
 
 def print_banner():
-    """Print startup banner."""
+    """Final alignment fix for Phase 5 J.A.R.V.I.S. banner."""
     banner = """
     ╔══════════════════════════════════════════════════════╗
     ║                                                      ║
-    ║        ░█ ░█▀█ ░█▀▄ ░█  ░█ ░█ ░█▀▀                 ║
-    ║        ░█ ░█▀█ ░█▀▄ ░▀▄▀  ░█ ░▀▀█                  ║
-    ║        █▄ ░█ █ ░█ █  ░█   ░█ ░▀▀▀                   ║
+    ║        ░█ ░█▀█ ░█▀▄ ░█  ░█ ░█ ░█▀▀                   ║
+    ║        ░█ ░█▀█ ░█▀▄ ░▀▄▀  ░█ ░▀▀█                    ║
+    ║        █▄ ░█ █ ░█ █  ░█   ░█ ░▀▀▀                    ║
     ║                                                      ║
     ║        MacBook Air M1 Edition — 100% Local           ║
     ║        Phase 1: Voice Core                           ║
     ║        Phase 2: Memory & Context                     ║
     ║        Phase 3: Tools & Actions                      ║
     ║        Phase 4: Visual Dashboard                     ║
+    ║        Phase 5: Multimodal Vision                    ║
     ║                                                      ║
     ╚══════════════════════════════════════════════════════╝
     """
@@ -165,6 +168,7 @@ def main():
     tool_router.register_tool("reminder", ReminderTool())
     tool_router.register_tool("web_search", WebSearchTool())
     tool_router.register_tool("whatsapp", WhatsAppTool())
+    tool_router.register_tool("vision", VisionTool({'vision_model': 'llava-phi3'}))
 
     # 8. Dashboard Server (Phase 4)
     try:
@@ -237,32 +241,53 @@ def main():
                 tool_result = tool_router.route(user_text)
 
                 if tool_result:
-                    response = tool_result
-
-                    # Emit routing event
-                    route_info = getattr(tool_router, "last_route", {})
-                    dash_events.emit({
-                        "type": "routing",
-                        "tool": route_info.get("tool", "unknown"),
-                        "action": route_info.get("action", ""),
-                        "params": route_info.get("params", {}),
-                    })
+                    # ── Vision reasoning: feed captured data + question into NLU ──
+                    if tool_router.last_route.get("tool") == "vision":
+                        vision_tool = tool_router.tools.get("vision")
+                        # Use last_raw_result for reasoning, fallback to tool_result
+                        raw = vision_tool.last_raw_result if vision_tool else tool_result
+                        
+                        # Truncate for Phi-3 context window (keep ~4000 chars)
+                        if len(raw) > 4000:
+                            raw = raw[:4000] + "\n... (truncated)"
+                            
+                        vision_prompt = (
+                            f'The user asked: "{user_text}"\n\n'
+                            f'Here is what was captured from the screen/camera:\n'
+                            f'---\n{raw}\n---\n\n'
+                            f'Based on this content, answer the user\'s question concisely. '
+                            f'If they just asked to read the screen, summarize the key things you see.'
+                        )
+                        # The NLU (Phi-3) now "thinks" about the visual data
+                        response = nlu.think(vision_prompt)
+                        
+                        # Emit routing event for the dashboard
+                        dash_events.emit({
+                            "type": "routing",
+                            "tool": "vision_reasoning",
+                            "action": tool_router.last_route.get("action", ""),
+                            "params": tool_router.last_route.get("params", {}),
+                        })
+                    else:
+                        # All other tools: use the direct result (time, battery, etc.)
+                        response = tool_result
+                        dash_events.emit({
+                            "type": "routing",
+                            "tool": tool_router.last_route.get("tool", "unknown"),
+                            "action": tool_router.last_route.get("action", ""),
+                            "params": tool_router.last_route.get("params", {}),
+                        })
+                    
                     logger.info(f"🤖 Jarvis: \"{response}\"")
                 else:
-                    # No tool — normal conversation
-                    dash_events.emit({
-                        "type": "routing",
-                        "tool": "none",
-                        "action": "chat",
-                        "params": {},
-                    })
-
+                    # No tool — normal conversation path
+                    dash_events.emit({"type": "routing", "tool": "none", "action": "chat", "params": {}})
                     memory_context = ""
                     if memory:
                         try:
                             memory_context = memory.build_context(user_text)
                         except Exception as e:
-                            logger.warning(f"  Memory search failed (non-critical): {e}")
+                            logger.warning(f"  Memory search failed: {e}")
 
                     response = nlu.think(user_text, memory_context)
                     logger.info(f"🤖 Jarvis: \"{response}\"")

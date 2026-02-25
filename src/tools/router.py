@@ -160,7 +160,7 @@ class ToolRouter:
             "what text", "text on screen", "ocr", "extract text",
             "what does my screen say"
         ]):
-            return {"tool": "vision", "action": "ocr", "params": {}}
+            return {"tool": "vision", "action": "ocr", "params": {"question": user_text}}
 
         # ── Vision: Describe screen ──
         if any(kw in text_lower for kw in [
@@ -169,7 +169,7 @@ class ToolRouter:
             "what app is open", "what am i looking at",
             "what am i working on", "describe screen"
         ]):
-            return {"tool": "vision", "action": "describe_screen", "params": {}}
+            return {"tool": "vision", "action": "describe_screen", "params": {"question": user_text}}
 
         # ── Vision: Webcam describe ──
         if any(kw in text_lower for kw in [
@@ -177,7 +177,7 @@ class ToolRouter:
             "webcam", "camera", "what am i wearing",
             "how do i look", "who do you see", "describe me"
         ]):
-            return {"tool": "vision", "action": "describe_webcam", "params": {}}
+            return {"tool": "vision", "action": "describe_webcam", "params": {"question": user_text}}
 
         # ── Weather / temperature → web_search ──
         if any(kw in text_lower for kw in [
