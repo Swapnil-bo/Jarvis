@@ -1,5 +1,5 @@
 """
-J.A.R.V.I.S. Tool Router — Phase 5
+J.A.R.V.I.S. Tool Router — Phase 6
 =====================================
 The brain behind tool selection. Takes user input, classifies intent,
 and routes to the appropriate tool.
@@ -32,6 +32,7 @@ Available tools:
 - web_search: search the internet, look up information, weather, temperature, news, prices, scores
 - whatsapp: send a WhatsApp message to someone
 - vision: read screen text (ocr), describe what's on screen (describe_screen), describe webcam view (describe_webcam)
+- code_executor: write and run Python scripts, automate tasks, system utilities
 
 Respond with ONLY a JSON object, nothing else. No markdown, no explanation.
 
@@ -42,6 +43,7 @@ IMPORTANT RULES:
 - "Read my screen" or "what text is on screen" is ALWAYS vision with action ocr.
 - "What's on my screen" or "describe my screen" is ALWAYS vision with action describe_screen.
 - "What do you see" (with webcam context) or "can you see me" is ALWAYS vision with action describe_webcam.
+- "Write a script", "write code", "write a python", or any request to automate/check systems via programming is ALWAYS code_executor.
 
 If it's a tool command:
 {"tool": "tool_name", "action": "specific_action", "params": {"key": "value"}}
@@ -87,6 +89,9 @@ User: "What app is open?" -> {"tool": "vision", "action": "describe_screen"}
 User: "Can you see me?" -> {"tool": "vision", "action": "describe_webcam"}
 User: "What do you see?" -> {"tool": "vision", "action": "describe_webcam"}
 User: "How do I look?" -> {"tool": "vision", "action": "describe_webcam"}
+User: "Write a script to sort my downloads" -> {"tool": "code_executor", "action": "run", "params": {"request": "sort my downloads"}}
+User: "Check my disk usage" -> {"tool": "code_executor", "action": "run", "params": {"request": "check disk usage"}}
+User: "Write a python code to add two numbers" -> {"tool": "code_executor", "action": "run", "params": {"request": "add two numbers"}}
 User: "How are you doing?" -> {"tool": "none"}
 User: "Tell me about yourself" -> {"tool": "none"}
 User: "What can you do?" -> {"tool": "none"}"""
@@ -178,6 +183,16 @@ class ToolRouter:
             "how do i look", "who do you see", "describe me"
         ]):
             return {"tool": "vision", "action": "describe_webcam", "params": {"question": user_text}}
+
+        # ── Code writing / execution (Phase 6) ──
+        if any(kw in text_lower for kw in [
+            "write a script", "write a program", "write code", "run a script",
+            "execute code", "python script", "write python", "code that",
+            "make a script", "create a script", "run python", "write a python",
+            "write me a", "automate", "sort my", "fetch api",
+            "system check", "disk usage", "list files"
+        ]):
+            return {"tool": "code_executor", "action": "run", "params": {"request": user_text}}
 
         # ── Weather / temperature → web_search ──
         if any(kw in text_lower for kw in [

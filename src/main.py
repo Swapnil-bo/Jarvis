@@ -6,6 +6,7 @@ Phase 2: Memory & Context
 Phase 3: Tools & Actions
 Phase 4: Visual Dashboard
 Phase 5: Multimodal Vision
+Phase 6: Code Execution & Agentic Flow
 
 Run:  python -m src.main
 """
@@ -16,6 +17,7 @@ import signal
 import sys
 import threading
 import time
+import re
 
 import psutil
 
@@ -32,6 +34,7 @@ from src.tools.reminder import ReminderTool
 from src.tools.web_search import WebSearchTool
 from src.tools.whatsapp import WhatsAppTool
 from src.vision.vision import VisionTool
+from src.tools.code_executor import CodeExecutor
 from src.dashboard import events as dash_events
 from src.utils.logger import get_logger, log_memory
 
@@ -53,7 +56,7 @@ def graceful_shutdown(sig, frame):
 
 
 def print_banner():
-    """Final alignment fix for Phase 5 J.A.R.V.I.S. banner."""
+    """Startup banner for J.A.R.V.I.S."""
     banner = """
     ╔══════════════════════════════════════════════════════╗
     ║                                                      ║
@@ -67,6 +70,7 @@ def print_banner():
     ║        Phase 3: Tools & Actions                      ║
     ║        Phase 4: Visual Dashboard                     ║
     ║        Phase 5: Multimodal Vision                    ║
+    ║        Phase 6: Code Execution & Agentic Flow        ║
     ║                                                      ║
     ╚══════════════════════════════════════════════════════╝
     """
@@ -169,6 +173,7 @@ def main():
     tool_router.register_tool("web_search", WebSearchTool())
     tool_router.register_tool("whatsapp", WhatsAppTool())
     tool_router.register_tool("vision", VisionTool({'vision_model': 'llava-phi3'}))
+    tool_router.register_tool("code_executor", CodeExecutor())
 
     # 8. Dashboard Server (Phase 4)
     try:
@@ -241,8 +246,46 @@ def main():
                 tool_result = tool_router.route(user_text)
 
                 if tool_result:
-                    # ── Vision reasoning: feed captured data + question into NLU ──
-                    if tool_router.last_route.get("tool") == "vision":
+                    current_tool = tool_router.last_route.get("tool")
+                    
+                    # ── Phase 6: CODE EXECUTOR REASONING ──
+                    if current_tool == "code_executor":
+                        dash_events.emit({"type": "status", "state": "thinking"})
+                        logger.info("🧠 Generating Python code...")
+                        
+                        code_prompt = (
+                            f'Write a Python script for this request: "{user_text}"\n\n'
+                            'Rules:\n'
+                            '- Output ONLY the Python code, no explanation\n'
+                            '- Use only standard library modules when possible\n'
+                            '- Include print() statements so the output is visible\n'
+                            '- Keep it concise and safe (no deleting files unless explicitly asked)\n'
+                            '- Do not use input() or anything that waits for user input'
+                        )
+
+                        # UPDATED LINE: Pass raw=True to preserve code formatting
+                        raw_code_response = nlu.think(code_prompt, raw=True)
+                        
+                        # Extract the code from Phi-3's response (strip markdown fences if present)
+                        extracted_code = raw_code_response
+                        match = re.search(r"```(?:python)?\n(.*?)```", raw_code_response, re.DOTALL | re.IGNORECASE)
+                        if match:
+                            extracted_code = match.group(1).strip()
+                        
+                        logger.info(f"📝 Executing Generated Code:\n{extracted_code}")
+                        
+                        # Pass to the code executor tool
+                        response = tool_router.tools["code_executor"].execute("run", {"code": extracted_code})
+                        
+                        dash_events.emit({
+                            "type": "routing",
+                            "tool": "code_executor",
+                            "action": "run",
+                            "params": {"code": extracted_code},
+                        })
+
+                    # ── Phase 5: VISION REASONING ──
+                    elif current_tool == "vision":
                         vision_tool = tool_router.tools.get("vision")
                         # Use last_raw_result for reasoning, fallback to tool_result
                         raw = vision_tool.last_raw_result if vision_tool else tool_result
@@ -258,18 +301,17 @@ def main():
                             f'Based on this content, answer the user\'s question concisely. '
                             f'If they just asked to read the screen, summarize the key things you see.'
                         )
-                        # The NLU (Phi-3) now "thinks" about the visual data
                         response = nlu.think(vision_prompt)
                         
-                        # Emit routing event for the dashboard
                         dash_events.emit({
                             "type": "routing",
                             "tool": "vision_reasoning",
                             "action": tool_router.last_route.get("action", ""),
                             "params": tool_router.last_route.get("params", {}),
                         })
+                        
+                    # ── ALL OTHER TOOLS ──
                     else:
-                        # All other tools: use the direct result (time, battery, etc.)
                         response = tool_result
                         dash_events.emit({
                             "type": "routing",

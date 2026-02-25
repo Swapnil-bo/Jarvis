@@ -6,16 +6,19 @@ Sends user queries to Ollama running Phi-3 Mini locally.
 Phi-3 Mini (3.8B params, Q4 quantized) uses ~2.3GB VRAM via Metal.
 Communicates via Ollama's REST API (localhost:11434).
 
-Fallback chain: Phi-3 → LLaMA 3.2 3B → hardcoded error message.
-
 Identity protection (3 layers):
   Layer 0: Hardcoded shortcut for identity questions (bypasses Phi-3)
   Layer 1: Memory context rewriting + system prompt firewall
   Layer 2: Post-processing poison phrase detection
+
+Raw mode:
+  When raw=True, skips all post-processing (Layer 2).
+  Used by code generation so backticks/markdown aren't stripped.
 """
 
 import re
 import requests
+import time
 
 from src.utils.config import load_config
 from src.utils.logger import get_logger, log_memory
@@ -24,11 +27,6 @@ logger = get_logger("core.nlu")
 
 # ──────────────────────────────────────────────────────────────
 # Identity confusion detection
-# ──────────────────────────────────────────────────────────────
-# If ANY of these appear in Phi-3's response, the whole response
-# is replaced with a clean hardcoded answer. Phi-3-mini (3.8B)
-# is too small to reliably separate "facts about the user" from
-# "facts about itself", so we catch it on the output side.
 # ──────────────────────────────────────────────────────────────
 
 IDENTITY_POISON_PHRASES = [
@@ -237,7 +235,7 @@ class NLUEngine:
     # ──────────────────────────────────────────────────────────
 
     def _call_ollama(self, prompt: str, model: str, memory_context: str = "") -> str:
-        """Make a request to Ollama's generate API."""
+        """Make a request to Ollama's generate API. Returns raw response."""
         full_system = self._build_system_prompt(memory_context)
 
         payload = {
@@ -252,42 +250,56 @@ class NLUEngine:
             },
         }
 
-        response = requests.post(
-            f"{self.base_url}/api/generate",
-            json=payload,
-            timeout=60,
-        )
-        response.raise_for_status()
+        for attempt in range(2):
+            try:
+                response = requests.post(
+                    f"{self.base_url}/api/generate",
+                    json=payload,
+                    timeout=60,
+                )
+                response.raise_for_status()
 
-        data = response.json()
-        raw_response = data.get("response", "").strip()
+                data = response.json()
+                return data.get("response", "").strip()
 
-        return self._clean_response(raw_response)
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning(f"Ollama request failed: {e}. Retrying in 3s...")
+                    time.sleep(3)
+                else:
+                    raise e
 
     # ──────────────────────────────────────────────────────────
     # Main entry point
     # ──────────────────────────────────────────────────────────
 
-    def think(self, user_input: str, memory_context: str = "") -> str:
+    def think(self, user_input: str, memory_context: str = "", raw: bool = False) -> str:
         """
         Process user input and return Jarvis's response.
 
+        Args:
+            user_input: The user's query or prompt.
+            memory_context: Optional memory context string.
+            raw: If True, skip all post-processing (Layer 2).
+                 Used for code generation where backticks/markdown
+                 must be preserved.
+
         Pipeline:
-            0. Identity shortcut (hardcoded, instant)
+            0. Identity shortcut (hardcoded, instant) — skipped if raw
             1. Phi-3 Mini (primary LLM)
-            2. LLaMA 3.2 3B (fallback LLM)
-            3. Hardcoded error (last resort)
+            2. Hardcoded error (last resort)
         """
         if not user_input:
             return "I didn't catch that. Could you repeat?"
 
-        logger.info(f"🧠 Thinking about: \"{user_input}\"")
+        logger.info(f"🧠 Thinking about: \"{user_input[:200]}\"")
 
-        # Layer 0: Identity shortcut — bypass Phi-3 entirely
-        identity_response = self._check_identity_shortcut(user_input)
-        if identity_response:
-            logger.info(f"💬 Identity shortcut: \"{identity_response[:60]}...\"")
-            return identity_response
+        # Layer 0: Identity shortcut — skip in raw mode
+        if not raw:
+            identity_response = self._check_identity_shortcut(user_input)
+            if identity_response:
+                logger.info(f"💬 Identity shortcut: \"{identity_response[:60]}...\"")
+                return identity_response
 
         if memory_context:
             logger.debug(f"  Memory context injected ({len(memory_context)} chars)")
@@ -306,24 +318,18 @@ class NLUEngine:
         try:
             logger.info(f"Using primary model: {self.model}")
             response = self._call_ollama(user_input, self.model, memory_context)
+
             if response:
-                logger.info(f"💬 Response: \"{response[:100]}...\"")
-                log_memory(logger)
-                return response
+                # Apply cleaning only in normal mode, skip for code gen
+                if not raw:
+                    response = self._clean_response(response)
+
+                if response:
+                    logger.info(f"💬 Response: \"{response[:100]}...\"")
+                    log_memory(logger)
+                    return response
+
         except Exception as e:
             logger.warning(f"Primary model failed: {e}")
-
-        # Fallback LLM
-        try:
-            logger.info(f"Falling back to: {self.fallback_model}")
-            response = self._call_ollama(
-                user_input, self.fallback_model, memory_context
-            )
-            if response:
-                logger.info(f"💬 Fallback response: \"{response[:100]}...\"")
-                log_memory(logger)
-                return response
-        except Exception as e:
-            logger.error(f"Fallback model also failed: {e}")
 
         return "I'm having trouble thinking right now. Please try again."
