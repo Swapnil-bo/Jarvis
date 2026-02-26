@@ -119,6 +119,22 @@ def start_telemetry(memory=None):
     t.start()
 
 
+# ── OPUS FIX 1: BETTER REGEX EXTRACTION ──
+def extract_code(raw: str) -> str:
+    """Robust code extraction supporting fenced and unfenced outputs."""
+    match = re.search(r"```(?:python|py)?\s*\n(.*?)```", raw, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    
+    # Fallback: if no fences, strip any leading/trailing prose
+    lines = raw.strip().split("\n")
+    code_lines = [l for l in lines if not l.startswith("This ") 
+                  and not l.startswith("Here ") 
+                  and not l.startswith("In this ")
+                  and not l.startswith("The code")]
+    return "\n".join(code_lines).strip()
+
+
 def main():
     global audio_capture
 
@@ -248,7 +264,7 @@ def main():
                 if tool_result:
                     current_tool = tool_router.last_route.get("tool")
                     
-                    # ── Phase 6: CODE EXECUTOR REASONING ──
+                    # ── Phase 6.31: ROBUST CODE EXECUTOR ──
                     if current_tool == "code_executor":
                         dash_events.emit({"type": "status", "state": "thinking"})
                         logger.info("🧠 Generating Python code...")
@@ -263,19 +279,46 @@ def main():
                             '- Do not use input() or anything that waits for user input'
                         )
 
-                        # UPDATED LINE: Pass raw=True to preserve code formatting
                         raw_code_response = nlu.think(code_prompt, raw=True)
-                        
-                        # Extract the code from Phi-3's response (strip markdown fences if present)
-                        extracted_code = raw_code_response
-                        match = re.search(r"```(?:python)?\n(.*?)```", raw_code_response, re.DOTALL | re.IGNORECASE)
-                        if match:
-                            extracted_code = match.group(1).strip()
+                        extracted_code = extract_code(raw_code_response)
                         
                         logger.info(f"📝 Executing Generated Code:\n{extracted_code}")
-                        
-                        # Pass to the code executor tool
                         response = tool_router.tools["code_executor"].execute("run", {"code": extracted_code})
+                        
+                        # ── OPUS FIX 2: AUTO-DETECT ERROR HINTS ──
+                        if response.startswith("Error") or "Traceback" in response:
+                            logger.info("🔄 Code failed. Analyzing error for self-healing...")
+                            dash_events.emit({"type": "status", "state": "thinking"})
+                            
+                            if "AttributeError" in response:
+                                hint = "An attribute or method does not exist on that object."
+                            elif "TypeError" in response:
+                                hint = "Wrong argument type or count."
+                            elif "ImportError" in response or "ModuleNotFoundError" in response:
+                                hint = "A module is not installed. Use only standard library."
+                            elif "SyntaxError" in response:
+                                hint = "There is a syntax error. Check quotes, brackets, colons."
+                            else:
+                                hint = "Review the traceback carefully."
+                            
+                            fix_prompt = (
+                                f'This Python code failed:\n```python\n{extracted_code}\n```\n\n'
+                                f'Error: {response}\n'
+                                f'Hint: {hint}\n\n'
+                                f'Fix ONLY the broken line. Output ONLY corrected code in triple backticks.'
+                            )
+                            
+                            fixed_raw = nlu.think(fix_prompt, raw=True)
+                            fixed_code = extract_code(fixed_raw)
+                            
+                            if fixed_code:
+                                logger.info(f"🛠️ Executing Fixed Code:\n{fixed_code}")
+                                response = tool_router.tools["code_executor"].execute("run", {"code": fixed_code})
+                                
+                                if response.startswith("Error") or "Traceback" in response:
+                                    response = "I tried to fix the code, sir, but it still has an error. You may need to tweak it manually."
+                            else:
+                                response = "I couldn't extract a fix for the code error."
                         
                         dash_events.emit({
                             "type": "routing",
@@ -283,14 +326,16 @@ def main():
                             "action": "run",
                             "params": {"code": extracted_code},
                         })
+                        
+                        # ── OPUS FIX 3: TARGETED GC AFTER HEAVY CODE RUN ──
+                        gc.collect()
+                        logger.debug("🧹 GC after code execution")
 
                     # ── Phase 5: VISION REASONING ──
                     elif current_tool == "vision":
                         vision_tool = tool_router.tools.get("vision")
-                        # Use last_raw_result for reasoning, fallback to tool_result
                         raw = vision_tool.last_raw_result if vision_tool else tool_result
                         
-                        # Truncate for Phi-3 context window (keep ~4000 chars)
                         if len(raw) > 4000:
                             raw = raw[:4000] + "\n... (truncated)"
                             
@@ -309,6 +354,10 @@ def main():
                             "action": tool_router.last_route.get("action", ""),
                             "params": tool_router.last_route.get("params", {}),
                         })
+                        
+                        # ── OPUS FIX 3: TARGETED GC AFTER VISION (LLaVA swap) ──
+                        gc.collect()
+                        logger.debug("🧹 GC after vision reasoning")
                         
                     # ── ALL OTHER TOOLS ──
                     else:
