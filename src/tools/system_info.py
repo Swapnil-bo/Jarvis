@@ -14,7 +14,7 @@ All responses are formatted for TTS (spoken aloud, no special characters).
 RAM impact: 0MB — uses only Python stdlib + psutil (already installed).
 """
 
-import subprocess
+import requests
 from datetime import datetime
 
 import psutil
@@ -59,13 +59,18 @@ class SystemInfoTool:
     def _get_time(self, params: dict) -> str:
         """Current time in 12-hour spoken format."""
         now = datetime.now()
+        
         # Format: "3:45 PM" spoken as "It's 3 45 PM"
         hour = now.strftime("%I").lstrip("0")  # Remove leading zero
         minute = now.strftime("%M")
         period = now.strftime("%p")
 
+        # Upgrade 1: TTS "Oh" Fix for single-digit minutes
         if minute == "00":
             return f"It's {hour} {period} exactly."
+        elif minute.startswith("0"):
+            # Converts "05" to "oh 5" for better TTS flow
+            return f"It's {hour} oh {minute[1]} {period}."
         else:
             return f"It's {hour} {minute} {period}."
 
@@ -113,30 +118,29 @@ class SystemInfoTool:
         Current weather using wttr.in (free, no API key, no signup).
         Falls back to a helpful message if no internet.
         """
-        city = params.get("city", params.get("location", ""))
+        # Upgrade 3: Geolocation Anchor (Defaults to Kolkata instead of random ISP location)
+        city = params.get("city", params.get("location", "Kolkata"))
 
         try:
             # wttr.in returns plain text weather with ?format parameter
             # %C = condition, %t = temperature, %h = humidity, %w = wind
             url = f"https://wttr.in/{city}?format=%C+%t"
 
-            result = subprocess.run(
-                ["curl", "-s", "--max-time", "5", url],
-                capture_output=True,
-                text=True,
-                timeout=8,
-            )
+            # Upgrade 2: Pythonic API Call (Replaces bulky subprocess curl)
+            response = requests.get(url, timeout=5)
 
-            if result.returncode == 0 and result.stdout.strip():
-                weather = result.stdout.strip()
+            if response.status_code == 200 and response.text.strip():
+                weather = response.text.strip()
+                
                 # Clean up the response for TTS
                 weather = weather.replace("+", " ").replace("°C", " degrees celsius")
                 weather = weather.replace("°F", " degrees fahrenheit")
 
-                if city:
+                # Handle TTS formatting based on whether it's the default city or not
+                if city.lower() != "kolkata":
                     return f"Weather in {city}: {weather}."
                 else:
-                    return f"Current weather: {weather}."
+                    return f"Current weather in Kolkata: {weather}."
             else:
                 return "I couldn't fetch the weather. Check your internet connection."
 
