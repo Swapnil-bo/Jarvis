@@ -601,8 +601,6 @@ pip install -r requirements.txt
 - **[ChromaDB](https://www.trychroma.com)** — Embedded vector database with zero fuss
 - **[Claude Opus](https://anthropic.com)** — AI engineering partner throughout the entire build
 
----
-
 
 
 ---
