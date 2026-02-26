@@ -45,6 +45,8 @@ IMPORTANT RULES:
 - "What's on my screen" or "describe my screen" is ALWAYS vision with action describe_screen.
 - "What do you see" (with webcam context) or "can you see me" is ALWAYS vision with action describe_webcam.
 - "Write a script", "write code", "write a python", or any request to automate/check systems via programming is ALWAYS code_executor.
+- If the user says "WhatsApp", "message", or "text", YOU MUST select the whatsapp tool.
+- Do not attempt to reply conversationally to a messaging request. Output JSON only.
 
 If it's a tool command:
 {"tool": "tool_name", "action": "specific_action", "params": {"key": "value"}}
@@ -94,7 +96,9 @@ User: "Check my disk usage" -> {"tool": "code_executor", "action": "run", "param
 User: "Write a python code to add two numbers" -> {"tool": "code_executor", "action": "run", "params": {"request": "add two numbers"}}
 User: "How are you doing?" -> {"tool": "none"}
 User: "Tell me about yourself" -> {"tool": "none"}
+User: "Can you send a WhatsApp message to Baba saying hi?" -> {"tool": "whatsapp", "action": "send", "params": {"contact": "Baba", "message": "hi"}}
 User: "What can you do?" -> {"tool": "none"}"""
+
 
 
 class ToolRouter:
@@ -236,13 +240,37 @@ class ToolRouter:
         ]):
             return {"tool": "web_search", "action": "search", "params": {"query": user_text}}
 
-        # ── WhatsApp messaging ──
-        if any(kw in text_lower for kw in [
-            "send a whatsapp", "whatsapp message", "message to",
-            "text to", "send message to", "send a message"
-        ]):
-            # Phi-3 handles contact + message extraction
+        # ── WhatsApp messaging (Stage 1 Auto-Extract) ──
+        if "whatsapp" in text_lower or "message to" in text_lower:
+            # Bypass Phi-3 LLM entirely for standard "to X saying Y" phrasing
+            match = re.search(r'to\s+(.*?)\s+saying\s+(.*)', text_lower)
+            if match:
+                contact = match.group(1).strip()
+                msg = match.group(2).strip()
+
+                # 🌟 THE ALIAS DICTIONARY 🌟
+                # Add any names Whisper consistently mishears here
+                aliases = {
+                    "pyle": "Payel",
+                    "pile": "Payel",
+                    "payal": "Payel",
+                    "boba": "Baba",
+                    "bubba": "Baba",
+                    "myself": "Me",
+                    "my self": "Me",
+                    "my number": "Me"
+                    
+                }
+                
+                # Check if Whisper's transcription matches a known mishearing.
+                # If yes, swap it. If no, just title-case whatever it heard.
+                contact = aliases.get(contact.lower(), contact.title())
+
+                return {"tool": "whatsapp", "action": "send", "params": {"contact": contact, "message": msg}}
+            
+            # If the phrasing is weird, fall through to Phi-3 as a backup
             return None
+            
 
         # ── App launch / control ──
         if any(kw in text_lower for kw in [

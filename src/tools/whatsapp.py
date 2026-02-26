@@ -67,9 +67,21 @@ class WhatsAppTool:
         logger.info(f"📱 WhatsApp: Sending to '{contact}': \"{message}\"")
 
         try:
-            # Step 1: Activate WhatsApp and bring to front
-            self._applescript('tell application "WhatsApp" to activate')
-            time.sleep(2.0)
+            # Step 1: Smart Focus - Activate WhatsApp and ensure it is frontmost before proceeding
+            self._applescript('''
+                tell application "WhatsApp" to activate
+                tell application "System Events"
+                    set timeout_counter to 0
+                    repeat until frontmost of process "WhatsApp" is true
+                        delay 0.5
+                        set timeout_counter to timeout_counter + 1
+                        if timeout_counter > 10 then exit repeat
+                    end repeat
+                end tell
+            ''')
+            
+            # Give the UI a tiny bit of breathing room after becoming frontmost
+            time.sleep(1.0)
 
             # Step 2: Use Cmd+F to focus the search bar safely
             self._applescript('''
@@ -117,16 +129,21 @@ class WhatsAppTool:
             return f"I had trouble sending the message to {contact}. Make sure WhatsApp is open and logged in."
 
     def _click(self, x: int, y: int):
-        """Click at screen coordinates using cliclick."""
+        """Click at screen coordinates using cliclick. Fails loud if unable to click."""
         try:
             subprocess.run(
                 ["/opt/homebrew/bin/cliclick", f"c:{x},{y}"],
                 capture_output=True,
                 timeout=5,
+                check=True  # This forces Python to raise an Exception if cliclick fails
             )
             logger.debug(f"  cliclick at ({x}, {y})")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"cliclick failed with exit code {e.returncode}")
+            raise RuntimeError(f"UI Click failed at coordinates {x}, {y}")
         except Exception as e:
-            logger.warning(f"cliclick failed: {e}")
+            logger.warning(f"cliclick encountered an error: {e}")
+            raise
 
     def _paste(self, text: str):
         """Copy text to clipboard via pbcopy, then Cmd+V."""
