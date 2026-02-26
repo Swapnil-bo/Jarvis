@@ -11,7 +11,6 @@ No cloud APIs. No subscriptions. No data leaves your machine. Ever.
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://python.org)
 [![Ollama](https://img.shields.io/badge/Ollama-Local%20LLM-green.svg)](https://ollama.com)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1%20Optimized-black.svg)](https://apple.com)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![100 Days of Vibe Coding](https://img.shields.io/badge/Challenge-100%20Days%20of%20Vibe%20Coding-orange.svg)](#)
 
 </div>
