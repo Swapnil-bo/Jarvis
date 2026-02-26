@@ -115,35 +115,46 @@ class SystemInfoTool:
 
     def _get_weather(self, params: dict) -> str:
         """
-        Current weather using wttr.in (free, no API key, no signup).
-        Falls back to a helpful message if no internet.
+        Current weather using wttr.in.
+        Falls back to web_search if wttr.in is down or times out.
         """
-        # Upgrade 3: Geolocation Anchor (Defaults to Kolkata instead of random ISP location)
-        city = params.get("city", params.get("location", "Kolkata"))
+        # Fix: Safely handle empty strings passed by the router
+        city = params.get("city", "") or params.get("location", "")
+        if not city:
+            city = "Kolkata"
 
         try:
-            # wttr.in returns plain text weather with ?format parameter
-            # %C = condition, %t = temperature, %h = humidity, %w = wind
             url = f"https://wttr.in/{city}?format=%C+%t"
+            headers = {"User-Agent": "curl/8.4.0"}
 
-            # Upgrade 2: Pythonic API Call (Replaces bulky subprocess curl)
-            response = requests.get(url, timeout=5)
-
+            # Give wttr.in one quick 5-second attempt
+            response = requests.get(url, headers=headers, timeout=5)
+            
             if response.status_code == 200 and response.text.strip():
                 weather = response.text.strip()
+                weather = weather.replace("+", " ").replace("°C", " degrees celsius").replace("°F", " degrees fahrenheit")
                 
-                # Clean up the response for TTS
-                weather = weather.replace("+", " ").replace("°C", " degrees celsius")
-                weather = weather.replace("°F", " degrees fahrenheit")
-
-                # Handle TTS formatting based on whether it's the default city or not
                 if city.lower() != "kolkata":
                     return f"Weather in {city}: {weather}."
                 else:
                     return f"Current weather in Kolkata: {weather}."
             else:
-                return "I couldn't fetch the weather. Check your internet connection."
+                logger.warning(f"wttr.in returned status {response.status_code}, falling back to web search")
+                raise ValueError("wttr.in failed")
 
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, ValueError) as e:
+            logger.warning(f"Weather API failed ({e}), initiating fallback web search...")
+            
+            # The Magic Fallback: Call the web_search tool directly
+            try:
+                from src.tools.web_search import WebSearchTool
+                search_tool = WebSearchTool()
+                # Force DuckDuckGo to avoid news articles and look for exact current temps
+                query = f"current temperature and weather conditions in {city} right now -news -forecast -IMD"
+                return search_tool.execute("search", {"query": query})
+            except Exception as e2:
+                logger.error(f"Fallback web search also failed: {e2}")
+                return "I'm having trouble getting the weather right now."
         except Exception as e:
-            logger.warning(f"Weather fetch failed: {e}")
+            logger.warning(f"Unexpected weather fetch error: {e}")
             return "I'm having trouble getting the weather right now."

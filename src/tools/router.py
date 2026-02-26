@@ -26,10 +26,10 @@ ROUTER_SYSTEM_PROMPT = """You are a command classifier for a voice assistant cal
 Given the user's spoken input, determine if they want to use a TOOL or just CHAT.
 
 Available tools:
-- system_info: time, date, day, battery level
+- system_info: time, date, day, battery level, current weather
 - mac_control: open/close apps, volume up/down/mute, brightness up/down, screenshot, sleep, lock screen
 - reminder: set timer, set reminder, countdown
-- web_search: search the internet, look up information, weather, temperature, news, prices, scores
+- web_search: search the internet, look up information, future weather forecasts, news, prices, scores
 - whatsapp: send a WhatsApp message to someone
 - vision: read screen text (ocr), describe what's on screen (describe_screen), describe webcam view (describe_webcam)
 - code_executor: write and run Python scripts, automate tasks, system utilities
@@ -39,7 +39,8 @@ Respond with ONLY a JSON object, nothing else. No markdown, no explanation.
 IMPORTANT RULES:
 - "Open [any app name]" is ALWAYS mac_control with action open_app, never another tool.
 - Only use the whatsapp tool when the user wants to SEND a message.
-- Any question about weather, temperature, news, prices, scores, or current real-world information is ALWAYS web_search.
+- Simple questions about CURRENT weather ("what is the weather") go to system_info.
+- Questions about FUTURE weather forecasts, news, prices, scores, or current real-world information go to web_search.
 - "Read my screen" or "what text is on screen" is ALWAYS vision with action ocr.
 - "What's on my screen" or "describe my screen" is ALWAYS vision with action describe_screen.
 - "What do you see" (with webcam context) or "can you see me" is ALWAYS vision with action describe_webcam.
@@ -72,13 +73,12 @@ User: "Lock the screen" -> {"tool": "mac_control", "action": "lock"}
 User: "Set a timer for 5 minutes" -> {"tool": "reminder", "action": "timer", "params": {"minutes": 5}}
 User: "Remind me in 10 minutes to call Mom" -> {"tool": "reminder", "action": "reminder", "params": {"minutes": 10, "message": "call Mom"}}
 User: "Search for best restaurants nearby" -> {"tool": "web_search", "action": "search", "params": {"query": "best restaurants nearby"}}
-User: "What's the temperature in Kolkata?" -> {"tool": "web_search", "action": "search", "params": {"query": "current temperature in Kolkata"}}
-User: "How's the weather today?" -> {"tool": "web_search", "action": "search", "params": {"query": "weather today"}}
-User: "What's the weather in Mumbai?" -> {"tool": "web_search", "action": "search", "params": {"query": "weather in Mumbai now"}}
+User: "How's the weather today?" -> {"tool": "system_info", "action": "weather", "params": {}}
+User: "What's the weather in Mumbai?" -> {"tool": "system_info", "action": "weather", "params": {"city": "Mumbai"}}
+User: "What's the weather forecast for tomorrow?" -> {"tool": "web_search", "action": "search", "params": {"query": "weather forecast tomorrow"}}
 User: "What's the latest news on AI?" -> {"tool": "web_search", "action": "search", "params": {"query": "latest AI news"}}
 User: "What is the price of Bitcoin?" -> {"tool": "web_search", "action": "search", "params": {"query": "Bitcoin price today"}}
 User: "Who won the cricket match?" -> {"tool": "web_search", "action": "search", "params": {"query": "cricket match result today"}}
-User: "What is the current temperature?" -> {"tool": "web_search", "action": "search", "params": {"query": "current temperature"}}
 User: "Send a WhatsApp message to Mom saying I'll be late" -> {"tool": "whatsapp", "action": "send", "params": {"contact": "Mom", "message": "I'll be late"}}
 User: "Message Aditya on WhatsApp saying hello" -> {"tool": "whatsapp", "action": "send", "params": {"contact": "Aditya", "message": "hello"}}
 User: "Read my screen" -> {"tool": "vision", "action": "ocr"}
@@ -138,6 +138,14 @@ class ToolRouter:
         """
         text_lower = user_text.lower()
 
+        # ── Fast-Track Chat / Greetings (Skip LLM) ──
+        chat_phrases = [
+            "hello", "hi", "hey", "how are you", "what's up",
+            "good morning", "good night", "thank you", "thanks"
+        ]
+        if any(text_lower.startswith(p) or text_lower == p for p in chat_phrases):
+            return None
+
         # ── Time queries ──
         if any(kw in text_lower for kw in [
             "what time", "current time", "tell me the time", "what's the time",
@@ -194,12 +202,24 @@ class ToolRouter:
         ]):
             return {"tool": "code_executor", "action": "run", "params": {"request": user_text}}
 
-        # ── Weather / temperature → web_search ──
+        # ── Weather / temperature split ──
         if any(kw in text_lower for kw in [
             "weather", "temperature", "how hot", "how cold", "forecast",
-            "rain today", "humidity", "sunny", "cloudy", "wind speed"
+            "rain", "humidity", "sunny", "cloudy", "wind speed"
         ]):
-            return {"tool": "web_search", "action": "search", "params": {"query": user_text}}
+            # Complex queries go to web_search
+            if any(fw in text_lower for fw in ["forecast", "week", "tomorrow", "weekend", "chance of"]):
+                return {"tool": "web_search", "action": "search", "params": {"query": user_text}}
+            
+            # Simple current weather goes to system_info
+            words = text_lower.split()
+            city = ""
+            if "in" in words:
+                idx = words.index("in")
+                if idx + 1 < len(words):
+                    city = words[idx + 1].title()
+            
+            return {"tool": "system_info", "action": "weather", "params": {"city": city}}
 
         # ── Current events / prices / scores → web_search ──
         if any(kw in text_lower for kw in [
