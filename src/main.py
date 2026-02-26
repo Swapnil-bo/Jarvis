@@ -272,11 +272,16 @@ def main():
                         code_prompt = (
                             f'Write a Python script for this request: "{user_text}"\n\n'
                             'Rules:\n'
-                            '- Output ONLY the Python code, no explanation\n'
-                            '- Use only standard library modules when possible\n'
-                            '- Include print() statements so the output is visible\n'
-                            '- Keep it concise and safe (no deleting files unless explicitly asked)\n'
-                            '- Do not use input() or anything that waits for user input'
+                            '- Output ONLY Python code in ```python``` blocks, no explanation\n'
+                            '- Use only standard library modules\n'
+                            '- Include print() statements so output is visible\n'
+                            '- No deleting files unless explicitly asked\n'
+                            '- No input() or blocking calls\n'
+                            '- For file operations, use simple for loops with os.path.getsize(f) and os.path.isfile(f)\n'
+                            '- Avoid complex one-liner list comprehensions\n'
+                            '- Keep logic procedural: initialize empty lists first, then append data inside loops\n'
+                            '- Use basic try/except blocks to handle missing files or permission errors\n'
+                            '- Format print() outputs as clean, short sentences since they will be spoken aloud via TTS\n'
                         )
 
                         raw_code_response = nlu.think(code_prompt, raw=True)
