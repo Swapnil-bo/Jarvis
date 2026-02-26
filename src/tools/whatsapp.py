@@ -71,8 +71,14 @@ class WhatsAppTool:
             self._applescript('tell application "WhatsApp" to activate')
             time.sleep(2.0)
 
-            # Step 2: Click the search bar and type contact name
-            self._click(150, 69)
+            # Step 2: Use Cmd+F to focus the search bar safely
+            self._applescript('''
+                tell application "System Events"
+                    tell process "WhatsApp"
+                        keystroke "f" using command down
+                    end tell
+                end tell
+            ''')
             time.sleep(0.5)
 
             # Step 4: Clear any existing search text, then type contact name
