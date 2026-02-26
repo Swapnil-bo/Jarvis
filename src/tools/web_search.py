@@ -17,6 +17,7 @@ RAM impact: ~0MB (uses existing Phi-3 via Ollama for summarization).
 """
 
 import requests
+from datetime import datetime
 
 from src.utils.config import load_config
 from src.utils.logger import get_logger
@@ -26,9 +27,12 @@ logger = get_logger("tools.web_search")
 # Summarization prompt — tells Phi-3 to create a TTS-friendly answer
 SUMMARIZE_PROMPT = """You are Jarvis, a voice assistant. Based on the search results below, give a concise spoken answer to the user's question.
 
+CURRENT DATE: {current_date}
+
 RULES:
 - Answer in 1 to 3 short sentences maximum.
 - Write exactly as you would speak aloud. No markdown, no bullet points, no special characters.
+- DO NOT read out URLs, links, or website names.
 - If the results don't answer the question, say so briefly.
 - NEVER make up information not found in the results.
 - STOP after answering. Do not generate instructions or continue writing.
@@ -149,6 +153,7 @@ class WebSearchTool:
             response = requests.get(
                 "https://api.duckduckgo.com/",
                 params={"q": query, "format": "json", "no_html": 1},
+                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
                 timeout=8,
             )
             data = response.json()
@@ -174,7 +179,12 @@ class WebSearchTool:
         """
         Use Phi-3 to summarize search results into a spoken answer.
         """
-        prompt = SUMMARIZE_PROMPT.format(results=snippets, question=question)
+        current_date = datetime.now().strftime("%A, %B %d, %Y")
+        prompt = SUMMARIZE_PROMPT.format(
+            current_date=current_date, 
+            results=snippets, 
+            question=question
+        )
 
         try:
             response = requests.post(
