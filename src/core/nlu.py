@@ -234,9 +234,12 @@ class NLUEngine:
     # Ollama API call
     # ──────────────────────────────────────────────────────────
 
-    def _call_ollama(self, prompt: str, model: str, memory_context: str = "") -> str:
+    def _call_ollama(self, prompt: str, model: str, memory_context: str = "", override_tokens: int = None) -> str:
         """Make a request to Ollama's generate API. Returns raw response."""
         full_system = self._build_system_prompt(memory_context)
+
+        # Use override if provided (for code gen), otherwise use config default
+        predict_limit = override_tokens if override_tokens is not None else self.max_tokens
 
         payload = {
             "model": model,
@@ -246,7 +249,7 @@ class NLUEngine:
             "options": {
                 "num_ctx": self.context_window,
                 "temperature": self.temperature,
-                "num_predict": self.max_tokens,
+                "num_predict": predict_limit,
             },
         }
 
@@ -317,7 +320,12 @@ class NLUEngine:
         # Layer 1+2: Phi-3 with firewall + post-processing
         try:
             logger.info(f"Using primary model: {self.model}")
-            response = self._call_ollama(user_input, self.model, memory_context)
+            
+            # If raw mode (code gen), give J.A.R.V.I.S. a massive 1024 token limit.
+            # Otherwise, use the standard chat limit.
+            token_limit = 1024 if raw else self.max_tokens
+            
+            response = self._call_ollama(user_input, self.model, memory_context, override_tokens=token_limit)
 
             if response:
                 # Apply cleaning only in normal mode, skip for code gen
